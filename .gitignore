@@ -1,0 +1,5 @@
+/target
+/db/*
+/test_db
+/config/vapid_private_key.pem
+/config/vapid_public_key.txt

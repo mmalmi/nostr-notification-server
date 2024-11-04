@@ -1,0 +1,38 @@
+[package]
+name = "nostr-notification-server"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+heed = "0.20.5"
+nostr-sdk = "0.35.0"
+serde = { version = "1.0.213", features = ["derive"] }
+serde_json = "1.0.132"
+tokio = { version = "1", features = ["full"] }
+unicode-segmentation = "1.12.0"
+warp = "0.3.7"
+config = "0.13.3"
+url = "2.2.2"
+log = "0.4"
+env_logger = "0.10"
+regex = "1.11.0"
+web-push = "0.10.2"
+base64 = "0.13.1"
+reqwest = "0.12.9"
+flatbuffers = "24.3.25"
+bincode = "1.3.3"
+p256 = { version = "0.13.2", features = ["ecdh"] }
+clru = "0.6.2"
+
+[dev-dependencies]
+nostr-notification-server = { path = "." }
+bytes = "1.8.0"
+rand = "0.8.5"
+
+[[test]]
+name = "integration_test"
+path = "tests/integration_test.rs"
+
+[[test]]
+name = "performance_test"
+path = "tests/performance_test.rs"

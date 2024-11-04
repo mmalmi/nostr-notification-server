@@ -1,0 +1,9 @@
+http_port = 3030
+hostname = "localhost"
+relays = [
+    "wss://relay.damus.io",
+    "wss://nos.lol",
+]
+db_map_size = 1073741824  # 1GB in bytes (1024 * 1024 * 1024)
+icon_url = "https://iris.to/img/android-chrome-192x192.png"
+notification_base_url = "https://iris.to"

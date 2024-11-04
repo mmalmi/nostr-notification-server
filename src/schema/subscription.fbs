@@ -1,0 +1,28 @@
+namespace subscription;
+
+table WebPushSubscription {
+  endpoint:string;
+  auth:string;
+  p256dh:string;
+}
+
+table Tag {
+    key:string;
+    values:[string];
+}
+
+table SubscriptionFilter {
+    ids:[string];
+    authors:[string];
+    kinds:[uint16];
+    search:string;
+    tags:[Tag];
+}
+
+table Subscription {
+    webhooks:[string];
+    web_push_subscriptions:[WebPushSubscription];
+    filter:SubscriptionFilter (required);
+}
+
+root_type Subscription; 
