@@ -1,6 +1,6 @@
 # Nostr Notification Server
 
-A server that sends web push notifications and webhooks when Nostr events match user-defined filters.
+A server that sends web push notifications and calls webhooks when Nostr events match user-defined filters.
 
 Built on Rust, Heed (LMDB) and Flatbuffers.
 
