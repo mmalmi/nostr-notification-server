@@ -16,7 +16,7 @@ Built on Rust, Heed (LMDB) and Flatbuffers.
 cargo build
 ```
 
-2. Configure settings in `config/default.toml`
+2. Configure settings in [config/default.toml](config/default.toml)
 
 3. Run server:
 ```bash
@@ -24,7 +24,7 @@ cargo run
 ```
 
 ## Configuration
-Edit `config/default.toml`:
+Edit [config/default.toml](config/default.toml):
 ```toml
 # Server settings (required for NIP-98 auth)
 http_port = 3030
@@ -38,6 +38,7 @@ relays = [
 
 # Database size limit in bytes
 db_map_size = 1073741824  # 1GB
+...
 ```
 
 Configuration can also be set via environment variables with the `NNS_` prefix:
