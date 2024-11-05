@@ -12,7 +12,7 @@ use crate::db::DbHandler;
 use crate::notifications::handle_incoming_event;
 
 pub async fn run_nostr_client(
-    db_handler: DbHandler,
+    db_handler: Arc<DbHandler>,
     settings: Arc<Settings>,
     shutdown_flag: Arc<AtomicBool>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {

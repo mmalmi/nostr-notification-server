@@ -1,5 +1,5 @@
 use nostr_sdk::nostr::Event;
-use nostr_sdk::ToBech32;
+use nostr_sdk::{Kind, ToBech32};
 use std::error::Error;
 use std::sync::Arc;
 use log::{debug, error};
@@ -7,7 +7,6 @@ use crate::config::Settings;
 use crate::db::DbHandler;
 use crate::subscription::Subscription;
 use crate::web_push::send_web_push;
-use crate::db::PTagIndex;
 use std::time::Instant;
 use serde::Serialize;
 
@@ -80,7 +79,12 @@ pub async fn handle_incoming_event(
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let start = Instant::now();
 
-    // print event kind and content substring
+    if event.kind == Kind::Metadata {
+        db_handler.profiles.handle_event(event)?;
+    } else if event.kind == Kind::ContactList {
+        db_handler.social_graph.handle_event(event)?;
+    }
+
     debug!("Processing event with kind: {} and content: {}", event.kind, 
            &event.content.chars().take(50).collect::<String>());
     
@@ -113,19 +117,14 @@ async fn process_p_tag(
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     debug!("Processing p_tag: {} for event: {}", p_value, event.id);
     
-    let Some(index_bytes) = db_handler.get_p_tag_index(p_value)? else { 
+    let Some(pubkeys) = db_handler.get_p_tag_index(p_value)? else { 
         debug!("No index found for p_tag: {}", p_value);
         return Ok(()) 
     };
     
-    let Some(index) = PTagIndex::deserialize(&index_bytes) else { 
-        debug!("Failed to deserialize index for p_tag: {}", p_value);
-        return Ok(()) 
-    };
-
-    debug!("Found {} subscriptions for p_tag: {}", index.pubkeys.len(), p_value);
+    debug!("Found {} subscriptions for p_tag: {}", pubkeys.len(), p_value);
     
-    for pubkey in &index.pubkeys {
+    for pubkey in &pubkeys {
         debug!("Processing subscription for pubkey: {}", pubkey);
         process_subscription(pubkey, event, db_handler, settings).await?;
     }

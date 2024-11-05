@@ -42,7 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     })?;
 
     info!("Initializing database...");
-    let db_handler = DbHandler::new(&settings)?;
+    let db_handler = Arc::new(DbHandler::new(&settings)?);
     info!("Database initialized successfully");
 
     // Create a single shutdown flag that we'll share

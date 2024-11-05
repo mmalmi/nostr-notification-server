@@ -1,49 +1,31 @@
 use heed::{Database, Env, EnvOpenOptions};
 use heed::types::*;
-use std::sync::Arc;
 use std::fs;
 use crate::subscription::Subscription;
-use serde::{Serialize, Deserialize};
-use bincode;
 use log::debug;
 use crate::config::Settings;
+use nostr_social_graph::{SocialGraph, SerializedSocialGraph, ProfileHandler};
+use std::error::Error as StdError;
+use nostr_sdk::{PublicKey, FromBech32};
 
-#[derive(Serialize, Deserialize)]
-pub struct PTagIndex {
-    pub pubkeys: Vec<String>
-}
-
-impl PTagIndex {
-    pub fn new(pubkeys: Vec<String>) -> Self {
-        Self { pubkeys }
-    }
-
-    pub fn serialize(&self) -> Vec<u8> {
-        bincode::serialize(self).unwrap()
-    }
-
-    pub fn deserialize(bytes: &[u8]) -> Option<Self> {
-        bincode::deserialize(bytes).ok()
-    }
-}
-
-#[derive(Clone)]
 pub struct DbHandler {
-    env: Arc<Env>,
-    db: Arc<Database<Str, Bytes>>,
-    subscriptions_by_p_tag: Arc<Database<Str, Bytes>>,
+    pub env: Env,
+    pub db: Database<Str, Bytes>,
+    subscriptions_by_p_tag: Database<Str, SerdeBincode<Vec<String>>>,
+    pub social_graph: SocialGraph,
+    pub profiles: ProfileHandler,
 }
 
 impl DbHandler {
-    pub fn new(settings: &Settings) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    pub fn new(settings: &Settings) -> Result<Self, Box<dyn StdError + Send + Sync>> {
         fs::create_dir_all(&settings.db_path)?;
 
-        let environment = Arc::new(unsafe {
+        let environment = unsafe {
             EnvOpenOptions::new()
                 .map_size(settings.db_map_size)
-                .max_dbs(10)
+                .max_dbs(20)
                 .open(&settings.db_path)?
-        });
+        };
 
         let (db, subscriptions_by_p_tag) = {
             let mut wtxn = environment.write_txn()?;
@@ -53,10 +35,35 @@ impl DbHandler {
             (db, subscriptions_by_p_tag)
         };
 
+        let root_pubkey = &settings.social_graph_root_pubkey;
+        let root_hex = if root_pubkey.starts_with("npub") {
+            PublicKey::from_bech32(root_pubkey)
+                .map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())) as Box<dyn StdError + Send + Sync>)?
+                .to_hex()
+        } else {
+            root_pubkey.to_string()
+        };
+
+        let social_graph = SocialGraph::new(
+            &root_hex,
+            environment.clone(),
+            None as Option<SerializedSocialGraph>
+        ).map_err(|e| {
+            let err_string = e.to_string();
+            Box::new(std::io::Error::new(std::io::ErrorKind::Other, err_string)) as Box<dyn StdError + Send + Sync>
+        })?;
+
+        let profiles = ProfileHandler::new(environment.clone()).map_err(|e| {
+            let err_string = e.to_string();
+            Box::new(std::io::Error::new(std::io::ErrorKind::Other, err_string)) as Box<dyn StdError + Send + Sync>
+        })?;
+
         Ok(Self {
             env: environment,
-            db: Arc::new(db),
-            subscriptions_by_p_tag: Arc::new(subscriptions_by_p_tag),
+            db,
+            subscriptions_by_p_tag,
+            social_graph,
+            profiles,
         })
     }
 
@@ -83,14 +90,13 @@ impl DbHandler {
             debug!("Found #p tags in subscription: {:?}", p_tags);
             for p_value in p_tags.iter() {
                 debug!("Processing p tag value: {}", p_value);
-                let mut index = self.subscriptions_by_p_tag
+                let mut pubkeys = self.subscriptions_by_p_tag
                     .get(&wtxn, p_value)?
-                    .and_then(|bytes| PTagIndex::deserialize(bytes))
-                    .unwrap_or_else(|| PTagIndex::new(Vec::new()));
+                    .unwrap_or_else(Vec::new);
                 
-                if !index.pubkeys.contains(&pubkey.to_string()) {
-                    index.pubkeys.push(pubkey.to_string());
-                    self.subscriptions_by_p_tag.put(&mut wtxn, p_value, &index.serialize())?;
+                if !pubkeys.contains(&pubkey.to_string()) {
+                    pubkeys.push(pubkey.to_string());
+                    self.subscriptions_by_p_tag.put(&mut wtxn, p_value, &pubkeys)?;
                     debug!("Added pubkey {} to p tag index for {}", pubkey, p_value);
                 }
             }
@@ -98,14 +104,6 @@ impl DbHandler {
         
         wtxn.commit()?;
         Ok(())
-    }
-
-    pub fn get_env(&self) -> Arc<Env> {
-        Arc::clone(&self.env)
-    }
-
-    pub fn get_db(&self) -> Arc<Database<Str, Bytes>> {
-        Arc::clone(&self.db)
     }
 
     pub fn delete_subscription(&self, pubkey: &str) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
@@ -120,9 +118,9 @@ impl DbHandler {
         Ok(self.db.get(&rtxn, pubkey)?.map(|bytes| bytes.to_vec()))
     }
 
-    pub fn get_p_tag_index(&self, p_value: &str) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error + Send + Sync>> {
+    pub fn get_p_tag_index(&self, p_value: &str) -> Result<Option<Vec<String>>, Box<dyn std::error::Error + Send + Sync>> {
         let rtxn = self.env.read_txn()?;
-        let result = self.subscriptions_by_p_tag.get(&rtxn, p_value)?.map(|bytes| bytes.to_vec());
+        let result = self.subscriptions_by_p_tag.get(&rtxn, p_value)?;
         debug!("Retrieved p tag index for {}: {:?}", p_value, result.is_some());
         Ok(result)
     }

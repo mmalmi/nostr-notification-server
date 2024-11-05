@@ -19,6 +19,7 @@ pub struct Settings {
     pub db_map_size: usize,
     pub icon_url: String,
     pub notification_base_url: String,
+    pub social_graph_root_pubkey: String,
 }
 
 fn default_db_path() -> String {
@@ -49,6 +50,7 @@ impl Settings {
         s = s.set_default("relays", Vec::<String>::new())?;
         s = s.set_default("icon_url", "https://iris.to/img/android-chrome-192x192.png")?;
         s = s.set_default("notification_base_url", "https://iris.to")?;
+        s = s.set_default("social_graph_root_pubkey", "npub1g53mukxnjkcmr94fhryzkqutdz2ukq4ks0gvy5af25rgmwsl4ngq43drvk")?;
 
         // Add in settings from environment
         s = s.add_source(Environment::with_prefix("NNS"));

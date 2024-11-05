@@ -1810,7 +1810,6 @@ name = "nostr-notification-server"
 version = "0.1.0"
 dependencies = [
  "base64 0.13.1",
- "bincode",
  "bytes",
  "clru",
  "config",
@@ -1818,8 +1817,8 @@ dependencies = [
  "flatbuffers",
  "heed",
  "log",
- "nostr-notification-server",
  "nostr-sdk",
+ "nostr-social-graph",
  "p256",
  "rand",
  "regex",
@@ -1884,6 +1883,15 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "nostr-social-graph"
+version = "0.1.0"
+dependencies = [
+ "heed",
+ "nostr",
+ "serde_json",
 ]
 
 [[package]]

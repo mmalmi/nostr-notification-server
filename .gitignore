@@ -1,4 +1,5 @@
 /target
+/nostr-social-graph/target
 /db/*
 /test_db
 /config/vapid_private_key.pem

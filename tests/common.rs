@@ -18,7 +18,14 @@ use p256::{
 use rand::RngCore;
 use base64::encode_config;
 use base64::URL_SAFE_NO_PAD;
-use nostr_notification_server::web_push::WebPushSubscription;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct WebPushSubscription {
+    pub endpoint: String,
+    pub auth: String,
+    pub p256dh: String,
+}
 
 pub fn get_test_keys_pair() -> (Keys, Keys) {
     let secret_key1 = SecretKey::from_hex(

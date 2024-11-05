@@ -14,7 +14,7 @@ use crate::notifications::handle_incoming_event;
 use crate::subscription::Subscription;
 
 pub async fn run_http_server(
-    db_handler: DbHandler,
+    db_handler: Arc<DbHandler>,
     settings: Arc<Settings>,
     shutdown_flag: Arc<AtomicBool>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -140,7 +140,7 @@ pub async fn run_http_server(
 }
 
 async fn handle_get_subscription(
-    db: DbHandler,
+    db: Arc<DbHandler>,
     _settings: Arc<Settings>,
     auth_pubkey: String,
     pubkey: String,
@@ -177,7 +177,7 @@ async fn handle_get_subscription(
 }
 
 async fn handle_post_subscription(
-    db_handler: DbHandler,
+    db_handler: Arc<DbHandler>,
     _settings: Arc<Settings>,
     auth_pubkey: String,
     pubkey: String,
@@ -237,7 +237,7 @@ async fn handle_post_subscription(
 }
 
 async fn handle_delete_subscription(
-    db_handler: DbHandler,
+    db_handler: Arc<DbHandler>,
     _settings: Arc<Settings>,
     auth_pubkey: String,
     pubkey: String,
@@ -260,7 +260,7 @@ async fn handle_delete_subscription(
 }
 
 async fn handle_post_event(
-    db_handler: DbHandler,
+    db_handler: Arc<DbHandler>,
     settings: Arc<Settings>,
     event: Event,
 ) -> Result<impl Reply, Rejection> {
@@ -303,10 +303,9 @@ async fn handle_info(
 }
 
 async fn handle_root(
-    db: DbHandler,
+    db: Arc<DbHandler>,
 ) -> Result<impl Reply, Rejection> {
-    let env = db.get_env();
-    let rtxn = env.read_txn().map_err(|e| {
+    let rtxn = db.env.read_txn().map_err(|e| {
         error!("Database error getting stats: {}", e);
         warp::reject::custom(CustomRejection {
             message: "Database error".to_string(),
@@ -314,7 +313,7 @@ async fn handle_root(
         })
     })?;
 
-    let stats = db.get_db().stat(&rtxn).map_err(|e| {
+    let stats = db.db.stat(&rtxn).map_err(|e| {
         error!("Database error getting stats: {}", e);
         warp::reject::custom(CustomRejection {
             message: "Database error".to_string(),
