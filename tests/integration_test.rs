@@ -116,7 +116,7 @@ async fn test_event_endpoint(
     assert!(webhook_payload.get("url").is_some(), "Payload should contain url");
     
     // Verify the content matches
-    assert_eq!(webhook_payload["title"].as_str().unwrap(), "New Nostr Mention");
+    assert_eq!(webhook_payload["title"].as_str().unwrap(), "New Mention from Unknown");
     assert_eq!(webhook_payload["body"].as_str().unwrap(), "Test content");
     assert!(webhook_payload["url"].as_str().unwrap().contains("https://iris.to/note1"));
 }

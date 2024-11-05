@@ -25,19 +25,29 @@ pub struct Author {
     pub picture: Option<String>,
 }
 
-pub async fn create_notification_payload(event: &Event, settings: &Settings) -> NotificationPayload {
+pub async fn create_notification_payload(
+    event: &Event, 
+    settings: &Settings,
+    db_handler: &Arc<DbHandler>,
+) -> NotificationPayload {
     const MAX_BODY_LENGTH: usize = 140;
     
-    let title = match event.kind.as_u16() {
-        1 => "New Nostr Mention",
-        4 | 1059 => "New Direct Message",
-        6 => "New Repost",
-        7 => "New Reaction",
-        _ => "New Nostr Notification",
-    }.to_string();
+    let event_type = match event.kind.as_u16() {
+        1 => "Mention",
+        4 | 1059 => "DM",
+        6 => "Repost",
+        7 => "Reaction",
+        _ => "Notification",
+    };
 
-    // linked post
+    let pubkey = event.pubkey.to_hex();
+    let author_name = db_handler.profiles.get_name(&pubkey)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "Unknown".to_string());
     
+    let title = format!("New {} from {}", event_type, author_name);
+
     let body = if event.kind.as_u16() == 1 {
         if event.content.chars().count() > MAX_BODY_LENGTH {
             format!("{}...", event.content.chars().take(MAX_BODY_LENGTH).collect::<String>())
@@ -50,11 +60,17 @@ pub async fn create_notification_payload(event: &Event, settings: &Settings) -> 
 
     let note_id = event.id.to_bech32().expect("Failed to convert event id to bech32");
 
+    // Use author's profile picture as icon if available, otherwise fall back to default
+    let icon = db_handler.profiles.get_picture(&pubkey)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| settings.icon_url.clone());
+
     NotificationPayload {
         event: Some(event.clone()),
         title,
         body,
-        icon: settings.icon_url.clone(),
+        icon,
         url: format!("{}/{}", settings.notification_base_url, note_id),
     }
 }
@@ -74,7 +90,7 @@ async fn send_webhook(
 
 pub async fn handle_incoming_event(
     event: &Event,
-    db_handler: &DbHandler,
+    db_handler: Arc<DbHandler>,
     settings: &Settings,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let start = Instant::now();
@@ -91,7 +107,7 @@ pub async fn handle_incoming_event(
     for tag in event.tags.iter() {
         if let Some(p_value) = extract_p_tag_value(tag) {
             let tag_start = Instant::now();
-            process_p_tag(p_value, event, db_handler, settings).await?;
+            process_p_tag(p_value, event, &db_handler, settings).await?;
             debug!("Tag processing took: {:?}", tag_start.elapsed());
         }
     }
@@ -112,7 +128,7 @@ fn extract_p_tag_value(tag: &nostr_sdk::nostr::Tag) -> Option<&String> {
 async fn process_p_tag(
     p_value: &String,
     event: &Event,
-    db_handler: &DbHandler,
+    db_handler: &Arc<DbHandler>,
     settings: &Settings,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     debug!("Processing p_tag: {} for event: {}", p_value, event.id);
@@ -126,7 +142,7 @@ async fn process_p_tag(
     
     for pubkey in &pubkeys {
         debug!("Processing subscription for pubkey: {}", pubkey);
-        process_subscription(pubkey, event, db_handler, settings).await?;
+        process_subscription(pubkey, event, db_handler.clone(), settings).await?;
     }
     Ok(())
 }
@@ -134,7 +150,7 @@ async fn process_p_tag(
 async fn process_subscription(
     pubkey: &str,
     event: &Event,
-    db_handler: &DbHandler,
+    db_handler: Arc<DbHandler>,
     settings: &Settings,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let Some(bytes) = db_handler.get_subscription_bytes(pubkey)? else { 
@@ -151,9 +167,15 @@ async fn process_subscription(
     let subscription = Subscription::deserialize(&bytes)?;
     let event_clone = event.clone();
     let settings_clone = settings.clone();
+    let db_handler_clone = db_handler.clone();
 
     tokio::spawn(async move {
-        if let Err(e) = send_notifications(subscription, event_clone, Arc::new(settings_clone)).await {
+        if let Err(e) = send_notifications(
+            subscription, 
+            event_clone, 
+            Arc::new(settings_clone), 
+            db_handler_clone
+        ).await {
             error!("Failed to send notification: {}", e);
         }
     });
@@ -165,9 +187,10 @@ pub async fn send_notifications(
     subscription: Subscription, 
     event: Event,
     settings: Arc<Settings>,
+    db_handler: Arc<DbHandler>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut tasks = Vec::new();
-    let payload = create_notification_payload(&event, &settings).await;
+    let payload = create_notification_payload(&event, &settings, &db_handler).await;
 
     for webhook_url in subscription.webhooks {
         let payload = payload.clone();

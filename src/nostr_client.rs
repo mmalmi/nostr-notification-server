@@ -1,8 +1,8 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
-use log::{error, info};
-use nostr_sdk::{Client, Filter, Keys, RelayPoolNotification, Timestamp};
+use log::{error, info, debug, warn};
+use nostr_sdk::{Client, Filter, Keys, RelayPoolNotification, Timestamp, Event};
 use tokio::time::timeout;
 use clru::CLruCache;
 use std::num::NonZeroUsize;
@@ -64,10 +64,30 @@ pub async fn run_nostr_client(
             // Store the event ID (using a dummy value since we only care about keys)
             seen_events.put(event_id, ());
 
-            if let Err(e) = handle_incoming_event(&event, &db_handler, settings.as_ref()).await {
+            if let Err(e) = handle_event(*event, db_handler.clone(), settings.clone()).await {
                 error!("Error handling event: {}", e);
             }
         }
+    }
+
+    Ok(())
+}
+
+async fn handle_event(
+    event: Event,
+    db_handler: Arc<DbHandler>,
+    settings: Arc<Settings>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    debug!("Received event: {:?}", event);
+
+    // Verify event signature
+    if let Err(e) = event.verify() {
+        warn!("Event signature verification failed: {:?}", e);
+        return Ok(());
+    }
+
+    if let Err(e) = handle_incoming_event(&event, db_handler, settings.as_ref()).await {
+        error!("Error handling event: {}", e);
     }
 
     Ok(())

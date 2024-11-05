@@ -3,8 +3,11 @@ use crate::unique_ids::{UniqueIds, UID};
 use heed::types::*;
 use heed::{Database, Env};
 use heed::byteorder::BigEndian;
-use nostr::{Event, Kind};
+use nostr_sdk::nostr::{Event, Kind};
 use crate::error::SocialGraphError;
+use log::debug;
+use heed::RoTxn;
+use std::error::Error as StdError;
 
 pub type SerializedUserList = (UID, Vec<UID>, Option<u64>);
 
@@ -138,6 +141,13 @@ impl SocialGraph {
     }
 
     pub fn handle_event(&self, event: &Event) -> Result<(), SocialGraphError> {
+        debug!("Starting handle_event for {}", event.pubkey);
+        let result = self.private_handle_event(event);
+        debug!("Finished handle_event for {}", event.pubkey);
+        result
+    }
+
+    fn private_handle_event(&self, event: &Event) -> Result<(), SocialGraphError> {
         if event.kind != Kind::ContactList {
             return Ok(());
         }
@@ -246,7 +256,9 @@ impl SocialGraph {
                 self.followed_by_user.delete(&mut wtxn, &author.to_string())?;
             }
 
+            debug!("Committing transaction for {}", event.pubkey);
             wtxn.commit()?;
+            debug!("Committed transaction for {}", event.pubkey);
             recalc_needed
         };
 
@@ -370,24 +382,6 @@ impl SocialGraph {
         };
         
         Ok(count)
-    }
-
-    pub fn size(&self) -> Result<(usize, usize), SocialGraphError> {
-        let rtxn = self.env.read_txn()?;
-        
-        let mut total_follows = 0;
-        let mut iter = self.followed_by_user.iter(&rtxn)?;
-        while let Some(Ok((_, followed_set))) = iter.next() {
-            total_follows += followed_set.len();
-        }
-
-        let mut total_users = 0;
-        let mut iter = self.follow_distance_by_user.iter(&rtxn)?;
-        while let Some(Ok(_)) = iter.next() {
-            total_users += 1;
-        }
-
-        Ok((total_users, total_follows))
     }
 
     pub fn followed_by_friends(&self, address: &str) -> Result<HashSet<String>, SocialGraphError> {
@@ -596,6 +590,19 @@ impl SocialGraph {
         }
         
         Ok(result)
+    }
+
+    pub fn size(&self) -> Result<(usize, usize), SocialGraphError> {
+        let rtxn = self.env.read_txn()?;
+        
+        let total_users = self.follow_distance_by_user.stat(&rtxn)?.entries as usize;
+        let total_follows = self.followed_by_user.stat(&rtxn)?.entries as usize;
+
+        Ok((total_users, total_follows))
+    }
+
+    pub fn size_with_txn(&self, txn: &RoTxn) -> Result<usize, Box<dyn StdError + Send + Sync>> {
+        Ok(self.followed_by_user.stat(txn)?.entries)
     }
 }
 

@@ -1,6 +1,15 @@
-use nostr_social_graph::SocialGraph;
-use nostr::{Event, Kind, Tag, PublicKey, UnsignedEvent, Keys, SecretKey};
+use nostr_sdk::{
+    Event, 
+    Kind, 
+    Tag, 
+    PublicKey, 
+    UnsignedEvent, 
+    Keys, 
+    SecretKey
+};
 use std::str::FromStr;
+use std::fs;
+use nostr_social_graph::SocialGraph;
 
 const ADAM: &str = "020f2d21ae09bf35fcdfb65decf1478b846f5f728ab30c5eaabcd6d081a81c3e";
 const FIATJAF: &str = "3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d";
@@ -29,8 +38,8 @@ fn create_follow_event(pubkey: &str, followed_pubkey: &str) -> Event {
 }
 
 fn create_test_env(path: &str) -> heed::Env {
-    let _ = std::fs::remove_dir_all(path);
-    std::fs::create_dir_all(path).expect("Failed to create test directory");
+    let _ = fs::remove_dir_all(path);
+    fs::create_dir_all(path).expect("Failed to create test directory");
     
     unsafe {
         heed::EnvOpenOptions::new()
@@ -46,7 +55,7 @@ fn test_initialize_with_root_user() {
     let env = create_test_env("test_db_init");
     let graph = SocialGraph::new(ADAM, env, None).expect("Failed to create graph");
     assert_eq!(graph.get_follow_distance(ADAM).unwrap(), 0);
-    let _ = std::fs::remove_dir_all("test_db_init");
+    let _ = fs::remove_dir_all("test_db_init");
 }
 
 #[test]
@@ -57,7 +66,7 @@ fn test_handle_follow_events() {
     
     graph.handle_event(&event).expect("Failed to handle event");
     assert!(graph.is_following(ADAM, FIATJAF).unwrap());
-    let _ = std::fs::remove_dir_all("test_db_follow");
+    let _ = fs::remove_dir_all("test_db_follow");
 }
 
 #[test]
@@ -72,7 +81,7 @@ fn test_update_follow_distances() {
     graph.handle_event(&event2).expect("Failed to handle event");
     
     assert_eq!(graph.get_follow_distance(SNOWDEN).unwrap(), 2);
-    let _ = std::fs::remove_dir_all("test_db_distances");
+    let _ = fs::remove_dir_all("test_db_distances");
 }
 
 #[test]
@@ -100,7 +109,7 @@ fn test_update_follow_distances_when_root_changed() {
     assert_eq!(graph.get_follow_distance(FIATJAF).unwrap(), 0);
     assert_eq!(graph.get_follow_distance(ADAM).unwrap(), 1000);
     
-    let _ = std::fs::remove_dir_all("test_db_root_change");
+    let _ = fs::remove_dir_all("test_db_root_change");
 }
 
 #[test]
@@ -119,7 +128,7 @@ fn test_follower_counts() {
     assert_eq!(graph.follower_count(FIATJAF).unwrap(), 3);
     assert_eq!(graph.follower_count(ADAM).unwrap(), 0);
     assert_eq!(graph.followed_by_friends_count(FIATJAF).unwrap(), 0);
-    let _ = std::fs::remove_dir_all("test_db_follower_counts");
+    let _ = fs::remove_dir_all("test_db_follower_counts");
 }
 
 #[test]
@@ -136,7 +145,7 @@ fn test_followed_by_friends() {
     let friends = graph.followed_by_friends(SNOWDEN).unwrap();
     assert!(friends.contains(FIATJAF));
     assert_eq!(friends.len(), 1);
-    let _ = std::fs::remove_dir_all("test_db_followed_by_friends");
+    let _ = fs::remove_dir_all("test_db_followed_by_friends");
 }
 
 #[test]
@@ -159,7 +168,7 @@ fn test_get_users_by_follow_distance() {
     assert_eq!(distance_2_users.len(), 1);
     assert!(distance_2_users.contains(&SNOWDEN.to_string()));
     
-    let _ = std::fs::remove_dir_all("test_db_get_users_by_follow_distance");
+    let _ = fs::remove_dir_all("test_db_get_users_by_follow_distance");
 }
 
 #[test]
@@ -190,22 +199,21 @@ fn test_serialize_deserialize() {
     assert_eq!(new_graph.get_follow_distance(SNOWDEN).unwrap(), 2);
     assert!(new_graph.is_following(ADAM, FIATJAF).unwrap());
     assert!(new_graph.is_following(FIATJAF, SNOWDEN).unwrap());
-    let _ = std::fs::remove_dir_all("test_db_serialize_deserialize");
+    let _ = fs::remove_dir_all("test_db_serialize_deserialize");
 }
 
 #[test]
 fn test_utilize_existing_follow_lists() {
-    // Create test directories
     let db_path1 = "test_db_1";
     let db_path2 = "test_db_2";
-    let _ = std::fs::remove_dir_all(db_path1); // Clean up any existing directory
-    let _ = std::fs::remove_dir_all(db_path2);
-    std::fs::create_dir_all(db_path1).expect("Failed to create test directory 1");
-    std::fs::create_dir_all(db_path2).expect("Failed to create test directory 2");
+    let _ = fs::remove_dir_all(db_path1);
+    let _ = fs::remove_dir_all(db_path2);
+    fs::create_dir_all(db_path1).expect("Failed to create test directory 1");
+    fs::create_dir_all(db_path2).expect("Failed to create test directory 2");
 
     let env = unsafe {
         heed::EnvOpenOptions::new()
-            .map_size(1024 * 1024 * 1024) // 10MB
+            .map_size(1024 * 1024 * 1024)
             .max_dbs(3000)
             .open(db_path1)
             .expect("Failed to create env")
@@ -264,6 +272,6 @@ fn test_utilize_existing_follow_lists() {
     assert_eq!(new_graph.get_follow_distance(SNOWDEN).unwrap(), 3);
 
     // Clean up test directories
-    let _ = std::fs::remove_dir_all(db_path1);
-    let _ = std::fs::remove_dir_all(db_path2);
+    let _ = fs::remove_dir_all(db_path1);
+    let _ = fs::remove_dir_all(db_path2);
 }

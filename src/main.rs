@@ -19,11 +19,39 @@ use std::time::Duration;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::signal;
 use std::fs;
+use clap::{Parser, Subcommand};
 
 #[cfg(unix)]
 use tokio::signal::unix::{signal, SignalKind};
 
+use nostr_social_graph::Crawler;
+use nostr_social_graph::SocialGraph;
+use nostr_social_graph::ProfileHandler;
+use nostr_social_graph::SerializedSocialGraph;
 use crate::db::DbHandler;
+use nostr_sdk::PublicKey;
+use nostr_sdk::FromBech32;
+
+#[derive(Parser)]
+#[command(author, version, about, long_about = None)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Run the server normally
+    Serve,
+    /// Run the crawler only
+    Crawl,
+    /// Crawl profiles
+    CrawlProfiles {
+        /// Only crawl missing profiles
+        #[arg(long)]
+        missing_only: bool,
+    },
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -31,6 +59,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     debug!("Starting main function");
 
+    let cli = Cli::parse();
+
+    match cli.command.unwrap_or(Commands::Serve) {
+        Commands::Serve => run_server().await,
+        Commands::Crawl => run_crawler().await,
+        Commands::CrawlProfiles { missing_only } => run_profile_crawler(missing_only).await,
+    }
+}
+
+async fn run_server() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Load settings first
     let settings = Arc::new(Settings::new()?);
     debug!("Settings loaded");
@@ -102,6 +140,124 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tokio::try_join!(nostr_client, server)?;
 
     debug!("Main function ending");
+    Ok(())
+}
+
+async fn run_crawler() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Load settings first
+    let settings = Arc::new(Settings::new()?);
+    debug!("Settings loaded");
+
+    // Create db directory if it doesn't exist
+    fs::create_dir_all(&settings.db_path).map_err(|e| {
+        error!("Failed to create database directory: {:?}", e);
+        e
+    })?;
+
+    // Create environment
+    let env = unsafe {
+        heed::EnvOpenOptions::new()
+            .map_size(settings.db_map_size)
+            .max_dbs(20)
+            .open(&settings.db_path)?
+    };
+
+    // Convert npub to hex if needed
+    let root_pubkey = &settings.social_graph_root_pubkey;
+    let root_hex = if root_pubkey.starts_with("npub") {
+        PublicKey::from_bech32(root_pubkey)?.to_hex()
+    } else {
+        root_pubkey.to_string()
+    };
+
+    // Create SocialGraph and ProfileHandler directly
+    let social_graph = Arc::new(SocialGraph::new(
+        &root_hex,
+        env.clone(),
+        None as Option<SerializedSocialGraph>
+    )?);
+    
+    let profile_handler = Arc::new(ProfileHandler::new(env.clone())?);
+    
+    let shutdown_flag = Arc::new(AtomicBool::new(false));
+    let shutdown_flag_clone = Arc::clone(&shutdown_flag);
+
+    let crawler = Crawler::new(
+        social_graph,
+        profile_handler,
+        settings.relays.clone(),
+        shutdown_flag_clone.clone(),
+    )?;
+
+    tokio::spawn(async move {
+        shutdown_signal().await;
+        info!("Shutdown signal received");
+        shutdown_flag.store(true, Ordering::Relaxed);
+    });
+
+    // Run initial crawl
+    info!("Starting initial crawl");
+    crawler.start().await?;
+
+    info!("Crawler shutting down");
+    Ok(())
+}
+
+async fn run_profile_crawler(missing_only: bool) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Load settings first
+    let settings = Arc::new(Settings::new()?);
+    debug!("Settings loaded");
+
+    // Create db directory if it doesn't exist
+    fs::create_dir_all(&settings.db_path).map_err(|e| {
+        error!("Failed to create database directory: {:?}", e);
+        e
+    })?;
+
+    // Create environment
+    let env = unsafe {
+        heed::EnvOpenOptions::new()
+            .map_size(settings.db_map_size)
+            .max_dbs(20)
+            .open(&settings.db_path)?
+    };
+
+    // Convert npub to hex if needed
+    let root_pubkey = &settings.social_graph_root_pubkey;
+    let root_hex = if root_pubkey.starts_with("npub") {
+        PublicKey::from_bech32(root_pubkey)?.to_hex()
+    } else {
+        root_pubkey.to_string()
+    };
+
+    let social_graph = Arc::new(SocialGraph::new(
+        &root_hex,
+        env.clone(),
+        None as Option<SerializedSocialGraph>
+    )?);
+    
+    let profile_handler = Arc::new(ProfileHandler::new(env.clone())?);
+    
+    let shutdown_flag = Arc::new(AtomicBool::new(false));
+    let shutdown_flag_clone = Arc::clone(&shutdown_flag);
+
+    let crawler = Crawler::new(
+        social_graph,
+        profile_handler,
+        settings.relays.clone(),
+        shutdown_flag_clone.clone(),
+    )?;
+
+    tokio::spawn(async move {
+        shutdown_signal().await;
+        info!("Shutdown signal received");
+        shutdown_flag.store(true, Ordering::Relaxed);
+    });
+
+    info!("Starting profile crawl ({})", if missing_only { "missing only" } else { "all profiles" });
+    crawler.crawl_profiles(missing_only).await?;
+
+    info!("Profile crawler shutting down");
     Ok(())
 }
 

@@ -124,4 +124,23 @@ impl DbHandler {
         debug!("Retrieved p tag index for {}: {:?}", p_value, result.is_some());
         Ok(result)
     }
+
+    pub fn get_stats(&self) -> Result<DbStats, Box<dyn std::error::Error + Send + Sync>> {
+        let rtxn = self.env.read_txn()?;
+        
+        let stats = DbStats {
+            subscriptions: self.db.stat(&rtxn)?.entries as u64,
+            social_graph: self.social_graph.size_with_txn(&rtxn)? as u64,
+            profiles: self.profiles.names.stat(&rtxn)?.entries as u64,
+        };
+
+        rtxn.commit()?;
+        Ok(stats)
+    }
+}
+
+pub struct DbStats {
+    pub subscriptions: u64,
+    pub social_graph: u64,
+    pub profiles: u64,
 }

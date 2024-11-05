@@ -5,5 +5,8 @@ edition = "2021"
 
 [dependencies]
 heed = "0.20.5"
-nostr = "0.35.0"
 serde_json = "1.0.132"
+url = "2.5.3"
+tokio = { version = "1.0", features = ["full"] }
+nostr-sdk = "0.35"
+log = "0.4"

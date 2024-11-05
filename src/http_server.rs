@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use log::{info, error, debug, warn};
 use nostr_sdk::Event;
+use std::convert::Infallible;
 
 use crate::config::Settings;
 use crate::db::DbHandler;
@@ -21,14 +22,10 @@ pub async fn run_http_server(
     let port = settings.http_port;
     info!("Starting HTTP server on port {}", port);
 
-    let settings_filter = Arc::clone(&settings);
-    let settings_auth = Arc::clone(&settings);
+    let db_filter = with_db(db_handler.clone());
+    let settings_filter = with_settings(settings.clone());
 
-    let db_filter = warp::any().map(move || db_handler.clone());
-
-    let settings = warp::any().map(move || Arc::clone(&settings_filter));
-    
-    let log = warp::log::custom(|info| {
+    let _log = warp::log::custom(|info| {
         info!("{} {} {} {}ms - {}", 
             info.method(),
             info.path(),
@@ -39,12 +36,14 @@ pub async fn run_http_server(
         );
     });
 
+    let settings_for_auth = settings.clone();
+
     // Auth middleware
     let auth = warp::header::optional::<String>("authorization")
         .and(warp::path::full())
         .and(warp::method())
         .and_then(move |auth_header: Option<String>, path: FullPath, method: Method| {
-            let base_url = settings_auth.base_url();
+            let base_url = settings_for_auth.base_url();
             async move {
                 // First check if auth header exists
                 let auth_str = auth_header.ok_or_else(|| {
@@ -76,7 +75,7 @@ pub async fn run_http_server(
 
     let subscriptions = warp::path("subscriptions")
         .and(db_filter.clone())
-        .and(settings.clone())
+        .and(settings_filter.clone())
         .and(auth.clone());
 
     let get_subscription = subscriptions.clone()
@@ -96,20 +95,20 @@ pub async fn run_http_server(
         .and_then(handle_delete_subscription);
 
     let info = warp::path("info")
-        .and(settings.clone())
         .and(warp::get())
+        .and(with_settings(settings.clone()))
         .and_then(handle_info);
 
     let events = warp::path("events")
         .and(db_filter.clone())
-        .and(settings)
+        .and(settings_filter.clone())
         .and(warp::post())
         .and(warp::body::json())
         .and_then(handle_post_event);
 
     let root = warp::path::end()
-        .and(db_filter.clone())
         .and(warp::get())
+        .and(with_db(db_handler.clone()))
         .and_then(handle_root);
 
     let routes = root
@@ -118,12 +117,8 @@ pub async fn run_http_server(
         .or(delete_subscription)
         .or(events)
         .or(info)
-        .recover(crate::errors::handle_rejection)
-        .with(log)
-        .with(warp::cors()
-            .allow_any_origin()
-            .allow_headers(vec!["content-type", "authorization"])
-            .allow_methods(vec!["GET", "POST", "DELETE", "OPTIONS"]));
+        .boxed()
+        .recover(crate::errors::handle_rejection);
 
     // Create server
     let (addr, server) = warp::serve(routes)
@@ -283,7 +278,7 @@ async fn handle_post_event(
 
     // Spawn a new task to handle the event processing
     tokio::spawn(async move {
-        if let Err(e) = handle_incoming_event(&event, &db_handler, settings.as_ref()).await {
+        if let Err(e) = handle_incoming_event(&event, db_handler, settings.as_ref()).await {
             error!("Background event processing failed: {:?}", e);
         }
     });
@@ -295,25 +290,17 @@ async fn handle_post_event(
 }
 
 async fn handle_info(
-    settings: Arc<Settings>
+    settings: Arc<Settings>,
 ) -> Result<impl Reply, Rejection> {
     Ok(warp::reply::json(&serde_json::json!({
-        "vapid_public_key": settings.vapid_public_key
+        "vapid_public_key": settings.vapid_public_key,
     })))
 }
 
 async fn handle_root(
     db: Arc<DbHandler>,
 ) -> Result<impl Reply, Rejection> {
-    let rtxn = db.env.read_txn().map_err(|e| {
-        error!("Database error getting stats: {}", e);
-        warp::reject::custom(CustomRejection {
-            message: "Database error".to_string(),
-            error_type: "DatabaseError".to_string(),
-        })
-    })?;
-
-    let stats = db.db.stat(&rtxn).map_err(|e| {
+    let stats = db.get_stats().map_err(|e| {
         error!("Database error getting stats: {}", e);
         warp::reject::custom(CustomRejection {
             message: "Database error".to_string(),
@@ -322,7 +309,9 @@ async fn handle_root(
     })?;
 
     Ok(warp::reply::json(&serde_json::json!({
-        "subscriptions": stats.entries
+        "subscriptions": stats.subscriptions,
+        "social_graph": stats.social_graph,
+        "profiles": stats.profiles,
     })))
 }
 
@@ -330,4 +319,14 @@ async fn shutdown_signal(shutdown_flag: Arc<AtomicBool>) {
     while !shutdown_flag.load(Ordering::Relaxed) {
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     }
+}
+
+// Helper function to share db with routes
+fn with_db(db: Arc<DbHandler>) -> impl Filter<Extract = (Arc<DbHandler>,), Error = Infallible> + Clone {
+    warp::any().map(move || db.clone())
+}
+
+// Helper function to share settings with routes
+fn with_settings(settings: Arc<Settings>) -> impl Filter<Extract = (Arc<Settings>,), Error = Infallible> + Clone {
+    warp::any().map(move || settings.clone())
 }
