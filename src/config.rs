@@ -6,8 +6,8 @@ use log::{debug, error};
 #[derive(Debug, Deserialize, Clone)]
 pub struct Settings {
     pub http_port: u16,
-    #[serde(default = "default_hostname")]
-    pub hostname: String,
+    #[serde(default = "default_base_url")]
+    pub base_url: String,
     #[serde(skip)]
     pub vapid_public_key: String,
     #[serde(skip)]
@@ -26,15 +26,11 @@ fn default_db_path() -> String {
     "db".to_string()
 }
 
-fn default_hostname() -> String {
-    "localhost".to_string()
+fn default_base_url() -> String {
+    "http://localhost:3030".to_string()
 }
 
 impl Settings {
-    pub fn base_url(&self) -> String {
-        format!("http://{}:{}", self.hostname, self.http_port)
-    }
-    
     pub fn new() -> Result<Self, ConfigError> {
         let mut s = Config::builder();
 
@@ -43,8 +39,6 @@ impl Settings {
             .add_source(File::with_name("config/local").required(false));
 
         // Set default values
-        s = s.set_default("http_port", 3030)?;
-        s = s.set_default("hostname", "0.0.0.0")?;
         s = s.set_default("db_path", "db")?;
         s = s.set_default("db_map_size", 1024 * 1024 * 1024)?;
         s = s.set_default("relays", Vec::<String>::new())?;
@@ -54,6 +48,12 @@ impl Settings {
 
         // Add in settings from environment
         s = s.add_source(Environment::with_prefix("NNS"));
+
+        // Keep port default
+        s = s.set_default("http_port", 3030)?;
+        
+        // Add base_url default
+        s = s.set_default("base_url", "http://localhost:3030")?;
 
         let config = s.build()?;
         let mut settings: Settings = config.try_deserialize()?;

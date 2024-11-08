@@ -28,7 +28,7 @@ Edit [config/default.toml](config/default.toml):
 ```toml
 # Server settings (required for NIP-98 auth)
 http_port = 3030
-hostname = "localhost"  # Set to your public domain/IP
+base_url = "https://example.com"  # Set to your public address where the application will be accessed
 
 # Nostr relays to connect to
 relays = [
@@ -44,7 +44,7 @@ db_map_size = 1073741824  # 1GB
 Configuration can also be set via environment variables with the `NNS_` prefix:
 ```bash
 NNS_HTTP_PORT=8080
-NNS_HOSTNAME=example.com
+NNS_BASE_URL=https://example.com
 NNS_DB_MAP_SIZE=2147483648
 NNS_RELAYS='["wss://relay1.com","wss://relay2.com"]'
 ```

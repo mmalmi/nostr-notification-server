@@ -36,14 +36,14 @@ pub async fn run_http_server(
         );
     });
 
-    let settings_for_auth = settings.clone();
+    let base_url = settings.base_url.clone();
 
     // Auth middleware
     let auth = warp::header::optional::<String>("authorization")
         .and(warp::path::full())
         .and(warp::method())
         .and_then(move |auth_header: Option<String>, path: FullPath, method: Method| {
-            let base_url = settings_for_auth.base_url();
+            let base_url = base_url.clone();
             async move {
                 // First check if auth header exists
                 let auth_str = auth_header.ok_or_else(|| {

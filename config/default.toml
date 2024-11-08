@@ -1,5 +1,8 @@
+# Keep port for server binding
 http_port = 3030
-hostname = "localhost"
+
+# Add base_url for external URL
+base_url = "http://0.0.0.0:3030"
 relays = [
     "wss://relay.damus.io",
     "wss://nos.lol",
