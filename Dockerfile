@@ -8,17 +8,21 @@ WORKDIR /usr/src/app
 
 # Copy only manifests first to cache dependencies
 COPY Cargo.toml Cargo.lock ./
+COPY nostr-social-graph/Cargo.toml nostr-social-graph/
 
-# Create a dummy main.rs to build dependencies
+# Create dummy main.rs files for both crates
 RUN mkdir src \
     && echo "fn main() {}" > src/main.rs \
+    && mkdir -p nostr-social-graph/src \
+    && echo "pub fn dummy() {}" > nostr-social-graph/src/lib.rs \
     && cargo build --release \
-    && rm -rf src
+    && rm -rf src nostr-social-graph/src
 
 # Now copy the real source code
 COPY src/ src/
 COPY config/ config/
 COPY tests/ tests/
+COPY nostr-social-graph/src/ nostr-social-graph/src/
 
 # Build the actual application
 RUN cargo build --release
