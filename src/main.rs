@@ -20,6 +20,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::signal;
 use std::fs;
 use clap::{Parser, Subcommand};
+use env_logger;
 
 #[cfg(unix)]
 use tokio::signal::unix::{signal, SignalKind};
@@ -55,9 +56,11 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Initialize the logger first thing
     env_logger::init();
 
-    debug!("Starting main function");
+    info!("Starting nostr-notification-server");
+    debug!("Debug logging enabled");
 
     let cli = Cli::parse();
 

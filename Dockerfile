@@ -6,25 +6,10 @@ RUN apt-get update && apt-get install -y pkg-config libssl-dev
 
 WORKDIR /usr/src/app
 
-# Copy only manifests first to cache dependencies
-COPY Cargo.toml Cargo.lock ./
-COPY nostr-social-graph/Cargo.toml nostr-social-graph/
+# First, copy all the workspace files
+COPY . .
 
-# Create dummy main.rs files for both crates
-RUN mkdir src \
-    && echo "fn main() {}" > src/main.rs \
-    && mkdir -p nostr-social-graph/src \
-    && echo "pub fn dummy() {}" > nostr-social-graph/src/lib.rs \
-    && cargo build --release \
-    && rm -rf src nostr-social-graph/src
-
-# Now copy the real source code
-COPY src/ src/
-COPY config/ config/
-COPY tests/ tests/
-COPY nostr-social-graph/src/ nostr-social-graph/src/
-
-# Build the actual application
+# Then build
 RUN cargo build --release
 
 # Runtime stage
