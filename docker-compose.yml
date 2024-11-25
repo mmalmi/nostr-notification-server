@@ -15,4 +15,4 @@ services:
       - NNS_HOSTNAME=localhost
       # Optional: Override other settings
       # - NNS_DB_MAP_SIZE=1073741824
-      # - NNS_RELAYS=["wss://relay.damus.io","wss://nos.lol"]
+      # - NNS_RELAYS=wss://relay.damus.io,wss://nos.lol

@@ -46,7 +46,18 @@ impl Settings {
         s = s.set_default("notification_base_url", "https://iris.to")?;
         s = s.set_default("social_graph_root_pubkey", "npub1g53mukxnjkcmr94fhryzkqutdz2ukq4ks0gvy5af25rgmwsl4ngq43drvk")?;
 
-        // Add in settings from environment
+        // Parse comma-separated relays from environment
+        if let Ok(relays_str) = std::env::var("NNS_RELAYS") {
+            let relays: Vec<String> = relays_str
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .collect();
+            if !relays.is_empty() {
+                s = s.set_override("relays", relays)?;
+            }
+        }
+
+        // Add other environment variables
         s = s.add_source(Environment::with_prefix("NNS"));
 
         // Keep port default
