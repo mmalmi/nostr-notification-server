@@ -133,10 +133,11 @@ async fn process_p_tag(
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     debug!("Processing p_tag: {} for event: {}", p_value, event.id);
     
-    let Some(pubkeys) = db_handler.get_p_tag_index(p_value)? else { 
+    let pubkeys = db_handler.get_p_tag_index(p_value)?;
+    if pubkeys.is_empty() {
         debug!("No index found for p_tag: {}", p_value);
-        return Ok(()) 
-    };
+        return Ok(());
+    }
     
     debug!("Found {} subscriptions for p_tag: {}", pubkeys.len(), p_value);
     

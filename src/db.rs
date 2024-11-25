@@ -11,7 +11,7 @@ use nostr_sdk::{PublicKey, FromBech32};
 pub struct DbHandler {
     pub env: Env,
     pub db: Database<Str, Bytes>,
-    subscriptions_by_p_tag: Database<Str, SerdeBincode<Vec<String>>>,
+    subscriptions_by_p_tag_and_id: Database<Str, Str>,
     pub social_graph: SocialGraph,
     pub profiles: ProfileHandler,
 }
@@ -27,12 +27,12 @@ impl DbHandler {
                 .open(&settings.db_path)?
         };
 
-        let (db, subscriptions_by_p_tag) = {
+        let (db, subscriptions_by_p_tag_and_id) = {
             let mut wtxn = environment.write_txn()?;
             let db = environment.create_database(&mut wtxn, Some("subscriptions"))?;
-            let subscriptions_by_p_tag = environment.create_database(&mut wtxn, Some("subscriptions_by_p_tag"))?;
+            let subscriptions_by_p_tag_and_id = environment.create_database(&mut wtxn, Some("subscriptions_by_p_tag_and_id"))?;
             wtxn.commit()?;
-            (db, subscriptions_by_p_tag)
+            (db, subscriptions_by_p_tag_and_id)
         };
 
         let root_pubkey = &settings.social_graph_root_pubkey;
@@ -61,7 +61,7 @@ impl DbHandler {
         Ok(Self {
             env: environment,
             db,
-            subscriptions_by_p_tag,
+            subscriptions_by_p_tag_and_id,
             social_graph,
             profiles,
         })
@@ -90,15 +90,9 @@ impl DbHandler {
             debug!("Found #p tags in subscription: {:?}", p_tags);
             for p_value in p_tags.iter() {
                 debug!("Processing p tag value: {}", p_value);
-                let mut pubkeys = self.subscriptions_by_p_tag
-                    .get(&wtxn, p_value)?
-                    .unwrap_or_else(Vec::new);
-                
-                if !pubkeys.contains(&pubkey.to_string()) {
-                    pubkeys.push(pubkey.to_string());
-                    self.subscriptions_by_p_tag.put(&mut wtxn, p_value, &pubkeys)?;
-                    debug!("Added pubkey {} to p tag index for {}", pubkey, p_value);
-                }
+                let composite_key = format!("{}:{}", p_value, pubkey);
+                self.subscriptions_by_p_tag_and_id.put(&mut wtxn, &composite_key, pubkey)?;
+                debug!("Added pubkey {} to p tag index with key {}", pubkey, composite_key);
             }
         }
         
@@ -118,11 +112,18 @@ impl DbHandler {
         Ok(self.db.get(&rtxn, pubkey)?.map(|bytes| bytes.to_vec()))
     }
 
-    pub fn get_p_tag_index(&self, p_value: &str) -> Result<Option<Vec<String>>, Box<dyn std::error::Error + Send + Sync>> {
+    pub fn get_p_tag_index(&self, p_value: &str) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
         let rtxn = self.env.read_txn()?;
-        let result = self.subscriptions_by_p_tag.get(&rtxn, p_value)?;
-        debug!("Retrieved p tag index for {}: {:?}", p_value, result.is_some());
-        Ok(result)
+        let prefix = format!("{}:", p_value);
+        
+        let subscriptions: Vec<String> = self.subscriptions_by_p_tag_and_id
+            .prefix_iter(&rtxn, &prefix)?
+            .filter_map(|result| result.ok())
+            .map(|(_, pubkey)| pubkey.to_string())
+            .collect();
+
+        debug!("Retrieved p tag index for {}: {:?}", p_value, subscriptions);
+        Ok(subscriptions)
     }
 
     pub fn get_stats(&self) -> Result<DbStats, Box<dyn std::error::Error + Send + Sync>> {
