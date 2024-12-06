@@ -133,54 +133,33 @@ async fn process_p_tag(
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     debug!("Processing p_tag: {} for event: {}", p_value, event.id);
     
-    let pubkeys = db_handler.get_p_tag_index(p_value)?;
-    if pubkeys.is_empty() {
-        debug!("No index found for p_tag: {}", p_value);
+    let subscriptions = db_handler.get_subscriptions_by_p_tag(p_value)?;
+    if subscriptions.is_empty() {
+        debug!("No subscriptions found for p_tag: {}", p_value);
         return Ok(());
     }
     
-    debug!("Found {} subscriptions for p_tag: {}", pubkeys.len(), p_value);
+    debug!("Found {} subscriptions for p_tag: {}", subscriptions.len(), p_value);
     
-    for pubkey in &pubkeys {
-        debug!("Processing subscription for pubkey: {}", pubkey);
-        process_subscription(pubkey, event, db_handler.clone(), settings).await?;
-    }
-    Ok(())
-}
+    for (_subscription_id, subscription) in subscriptions {
+        debug!("Processing subscription: {:?}", subscription);
+        if subscription.matches_event(event) {
+            let event_clone = event.clone();
+            let settings_clone = settings.clone();
+            let db_handler_clone = db_handler.clone();
 
-async fn process_subscription(
-    pubkey: &str,
-    event: &Event,
-    db_handler: Arc<DbHandler>,
-    settings: &Settings,
-) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let Some(bytes) = db_handler.get_subscription_bytes(pubkey)? else { 
-        debug!("No subscription found for pubkey: {}", pubkey);
-        return Ok(()) 
-    };
-    
-    if !Subscription::matches_event_filter_only(&bytes, event)? {
-        debug!("Event does not match filter for pubkey: {}", pubkey);
-        return Ok(());
-    }
-
-    debug!("Event matches filter for pubkey: {}", pubkey);
-    let subscription = Subscription::deserialize(&bytes)?;
-    let event_clone = event.clone();
-    let settings_clone = settings.clone();
-    let db_handler_clone = db_handler.clone();
-
-    tokio::spawn(async move {
-        if let Err(e) = send_notifications(
-            subscription, 
-            event_clone, 
-            Arc::new(settings_clone), 
-            db_handler_clone
-        ).await {
-            error!("Failed to send notification: {}", e);
+            tokio::spawn(async move {
+                if let Err(e) = send_notifications(
+                    subscription, 
+                    event_clone, 
+                    Arc::new(settings_clone), 
+                    db_handler_clone
+                ).await {
+                    error!("Failed to send notification: {}", e);
+                }
+            });
         }
-    });
-
+    }
     Ok(())
 }
 
@@ -196,6 +175,7 @@ pub async fn send_notifications(
     for webhook_url in subscription.webhooks {
         let payload = payload.clone();
         tasks.push(tokio::spawn(async move {
+            println!("Sending webhook to: {}", webhook_url);
             send_webhook(&webhook_url, &payload).await
         }));
     }

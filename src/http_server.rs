@@ -3,9 +3,10 @@ use warp::path::FullPath;
 use warp::http::{Method, StatusCode};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use log::{info, error, debug, warn};
+use log::{info, error, debug};
 use nostr_sdk::Event;
 use std::convert::Infallible;
+use uuid::Uuid;
 
 use crate::config::Settings;
 use crate::db::DbHandler;
@@ -78,14 +79,23 @@ pub async fn run_http_server(
         .and(settings_filter.clone())
         .and(auth.clone());
 
+    let get_subscriptions = subscriptions.clone()
+        .and(warp::get())
+        .and_then(handle_get_subscriptions);
+
     let get_subscription = subscriptions.clone()
         .and(warp::get())
         .and(warp::path::param::<String>())
         .and_then(handle_get_subscription);
 
-    let post_subscription = subscriptions.clone()
+    let update_subscription = subscriptions.clone()
         .and(warp::post())
         .and(warp::path::param::<String>())
+        .and(warp::body::json())
+        .and_then(handle_update_subscription);
+
+    let post_subscription = subscriptions.clone()
+        .and(warp::post())
         .and(warp::body::json())
         .and_then(handle_post_subscription);
 
@@ -113,6 +123,8 @@ pub async fn run_http_server(
 
     let routes = root
         .or(get_subscription)
+        .or(get_subscriptions)
+        .or(update_subscription)
         .or(post_subscription)
         .or(delete_subscription)
         .or(events)
@@ -134,31 +146,39 @@ pub async fn run_http_server(
     Ok(())
 }
 
+async fn handle_get_subscriptions(
+    db: Arc<DbHandler>,
+    _settings: Arc<Settings>,
+    auth_pubkey: String,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    match db.get_subscriptions_for_pubkey(&auth_pubkey) {
+        Ok(subscriptions) => {
+            let response: serde_json::Map<String, serde_json::Value> = subscriptions.into_iter()
+                .map(|(id, sub)| (id, serde_json::to_value(sub).unwrap()))
+                .collect();
+            Ok(warp::reply::json(&response))
+        }
+        Err(e) => {
+            error!("Database error while getting subscriptions: {}", e);
+            Err(warp::reject::custom(CustomRejection {
+                message: "Database error".to_string(),
+                error_type: "DatabaseError".to_string(),
+            }))
+        }
+    }
+}
+
 async fn handle_get_subscription(
     db: Arc<DbHandler>,
     _settings: Arc<Settings>,
     auth_pubkey: String,
-    pubkey: String,
+    id: String,
 ) -> Result<impl warp::Reply, warp::Rejection> {
-    debug!("handle_get_subscription called with auth_pubkey: {}, requested pubkey: {}", 
-        auth_pubkey, pubkey);
-
-    if auth_pubkey != pubkey {
-        warn!("Auth pubkey {} does not match requested pubkey {}", 
-            auth_pubkey, pubkey);
-        return Err(warp::reject::custom(CustomRejection {
-            message: "Not authorized to access this subscription".to_string(),
-            error_type: "AuthError".to_string(),
-        }));
-    }
-
-    match db.get_subscription(&pubkey) {
+    match db.get_subscription(&auth_pubkey, &id) {
         Ok(Some(subscription)) => {
-            debug!("Found subscription for pubkey: {}", pubkey);
             Ok(warp::reply::json(&subscription))
         }
         Ok(None) => {
-            debug!("No subscription found for pubkey: {}", pubkey);
             Err(warp::reject::not_found())
         }
         Err(e) => {
@@ -175,76 +195,38 @@ async fn handle_post_subscription(
     db_handler: Arc<DbHandler>,
     _settings: Arc<Settings>,
     auth_pubkey: String,
-    pubkey: String,
-    subscription: Subscription,
+    mut subscription: Subscription,
 ) -> Result<impl Reply, Rejection> {
-    debug!("POST subscription request - auth_pubkey: {}, pubkey: {}, subscription: {:?}", 
-        auth_pubkey, pubkey, subscription);
+    let id = Uuid::new_v4().to_string();
+    
+    // Set the subscriber to match the authenticated user
+    subscription.subscriber = auth_pubkey.clone();
+    
+    db_handler.save_subscription(&auth_pubkey, &id, &subscription)
+        .map_err(|e| {
+            error!("Database error saving new subscription: {}", e);
+            warp::reject::custom(CustomRejection {
+                message: clean_error_message(&e.to_string()),
+                error_type: "DatabaseError".to_string(),
+            })
+        })?;
 
-    // Verify the authenticated user matches the requested pubkey
-    if auth_pubkey != pubkey {
-        return Err(warp::reject::custom(CustomRejection {
-            message: "Unauthorized".to_string(),
-            error_type: "AuthError".to_string(),
-        }));
-    }
-
-    let existing = db_handler.get_subscription(&pubkey).map_err(|e| {
-        error!("Database error getting subscription: {}", e);
-        warp::reject::custom(CustomRejection {
-            message: clean_error_message(&e.to_string()),
-            error_type: "DatabaseError".to_string(),
-        })
-    })?;
-
-    match existing {
-        Some(mut existing_sub) => {
-            existing_sub.merge(subscription);
-            
-            db_handler.save_subscription(&pubkey, &existing_sub).map_err(|e| {
-                error!("Database error saving subscription: {}", e);
-                warp::reject::custom(CustomRejection {
-                    message: clean_error_message(&e.to_string()),
-                    error_type: "DatabaseError".to_string(),
-                })
-            })?;
-
-            Ok(warp::reply::with_status(
-                warp::reply::json(&"Updated"),
-                StatusCode::OK
-            ))
-        },
-        None => {
-            db_handler.save_subscription(&pubkey, &subscription).map_err(|e| {
-                error!("Database error saving new subscription: {}", e);
-                warp::reject::custom(CustomRejection {
-                    message: clean_error_message(&e.to_string()),
-                    error_type: "DatabaseError".to_string(),
-                })
-            })?;
-
-            Ok(warp::reply::with_status(
-                warp::reply::json(&"Created"),
-                StatusCode::CREATED
-            ))
-        }
-    }
+    Ok(warp::reply::with_status(
+        warp::reply::json(&serde_json::json!({
+            "id": id,
+            "status": "Created"
+        })),
+        StatusCode::CREATED
+    ))
 }
 
 async fn handle_delete_subscription(
     db_handler: Arc<DbHandler>,
     _settings: Arc<Settings>,
     auth_pubkey: String,
-    pubkey: String,
+    id: String,
 ) -> Result<impl Reply, Rejection> {
-    if auth_pubkey != pubkey {
-        return Err(warp::reject::custom(CustomRejection {
-            message: "Unauthorized".to_string(),
-            error_type: "AuthError".to_string(),
-        }));
-    }
-
-    match db_handler.delete_subscription(&pubkey) {
+    match db_handler.delete_subscription(&auth_pubkey, &id) {
         Ok(true) => Ok(StatusCode::NO_CONTENT),
         Ok(false) => Err(warp::reject::not_found()),
         Err(e) => Err(warp::reject::custom(CustomRejection {
@@ -313,6 +295,33 @@ async fn handle_root(
         "social_graph": stats.social_graph,
         "profiles": stats.profiles,
     })))
+}
+
+async fn handle_update_subscription(
+    db_handler: Arc<DbHandler>,
+    _settings: Arc<Settings>,
+    auth_pubkey: String,
+    id: String,
+    mut subscription: Subscription,
+) -> Result<impl Reply, Rejection> {
+    // Set the subscriber to match the authenticated user
+    subscription.subscriber = auth_pubkey.clone();
+    
+    db_handler.save_subscription(&auth_pubkey, &id, &subscription)
+        .map_err(|e| {
+            error!("Database error updating subscription: {}", e);
+            warp::reject::custom(CustomRejection {
+                message: clean_error_message(&e.to_string()),
+                error_type: "DatabaseError".to_string(),
+            })
+        })?;
+
+    Ok(warp::reply::with_status(
+        warp::reply::json(&serde_json::json!({
+            "status": "Updated"
+        })),
+        StatusCode::OK
+    ))
 }
 
 async fn shutdown_signal(shutdown_flag: Arc<AtomicBool>) {

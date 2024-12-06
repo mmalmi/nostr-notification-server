@@ -39,8 +39,6 @@ async fn create_test_subscriptions(
         let pubkey = keys.public_key().to_string();
         pubkeys.push(pubkey.clone());
 
-        let base_url = format!("http://0.0.0.0:3030/subscriptions/{}", pubkey);
-
         // Last subscription watches for events tagging target_pubkey
         let filter = if i == count - 1 {
             serde_json::json!({
@@ -65,7 +63,7 @@ async fn create_test_subscriptions(
         let response = make_authed_request_with_keys(
             client,
             reqwest::Method::POST,
-            &base_url,
+            "http://0.0.0.0:3030/subscriptions",
             Some(subscription),
             &keys
         ).await;

@@ -443,6 +443,7 @@ impl<'a> Subscription<'a> {
   pub const VT_WEBHOOKS: flatbuffers::VOffsetT = 4;
   pub const VT_WEB_PUSH_SUBSCRIPTIONS: flatbuffers::VOffsetT = 6;
   pub const VT_FILTER: flatbuffers::VOffsetT = 8;
+  pub const VT_SUBSCRIBER: flatbuffers::VOffsetT = 10;
 
   #[inline]
   pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
@@ -454,6 +455,7 @@ impl<'a> Subscription<'a> {
     args: &'args SubscriptionArgs<'args>
   ) -> flatbuffers::WIPOffset<Subscription<'bldr>> {
     let mut builder = SubscriptionBuilder::new(_fbb);
+    if let Some(x) = args.subscriber { builder.add_subscriber(x); }
     if let Some(x) = args.filter { builder.add_filter(x); }
     if let Some(x) = args.web_push_subscriptions { builder.add_web_push_subscriptions(x); }
     if let Some(x) = args.webhooks { builder.add_webhooks(x); }
@@ -476,11 +478,18 @@ impl<'a> Subscription<'a> {
     unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<WebPushSubscription>>>>(Subscription::VT_WEB_PUSH_SUBSCRIPTIONS, None)}
   }
   #[inline]
-  pub fn filter(&self) -> SubscriptionFilter<'a> {
+  pub fn filter(&self) -> Option<SubscriptionFilter<'a>> {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
-    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<SubscriptionFilter>>(Subscription::VT_FILTER, None).unwrap()}
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<SubscriptionFilter>>(Subscription::VT_FILTER, None)}
+  }
+  #[inline]
+  pub fn subscriber(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<&str>>(Subscription::VT_SUBSCRIBER, None)}
   }
 }
 
@@ -493,7 +502,8 @@ impl flatbuffers::Verifiable for Subscription<'_> {
     v.visit_table(pos)?
      .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<&'_ str>>>>("webhooks", Self::VT_WEBHOOKS, false)?
      .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<WebPushSubscription>>>>("web_push_subscriptions", Self::VT_WEB_PUSH_SUBSCRIPTIONS, false)?
-     .visit_field::<flatbuffers::ForwardsUOffset<SubscriptionFilter>>("filter", Self::VT_FILTER, true)?
+     .visit_field::<flatbuffers::ForwardsUOffset<SubscriptionFilter>>("filter", Self::VT_FILTER, false)?
+     .visit_field::<flatbuffers::ForwardsUOffset<&str>>("subscriber", Self::VT_SUBSCRIBER, false)?
      .finish();
     Ok(())
   }
@@ -502,6 +512,7 @@ pub struct SubscriptionArgs<'a> {
     pub webhooks: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<&'a str>>>>,
     pub web_push_subscriptions: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<WebPushSubscription<'a>>>>>,
     pub filter: Option<flatbuffers::WIPOffset<SubscriptionFilter<'a>>>,
+    pub subscriber: Option<flatbuffers::WIPOffset<&'a str>>,
 }
 impl<'a> Default for SubscriptionArgs<'a> {
   #[inline]
@@ -509,7 +520,8 @@ impl<'a> Default for SubscriptionArgs<'a> {
     SubscriptionArgs {
       webhooks: None,
       web_push_subscriptions: None,
-      filter: None, // required field
+      filter: None,
+      subscriber: None,
     }
   }
 }
@@ -532,6 +544,10 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> SubscriptionBuilder<'a, 'b, A> 
     self.fbb_.push_slot_always::<flatbuffers::WIPOffset<SubscriptionFilter>>(Subscription::VT_FILTER, filter);
   }
   #[inline]
+  pub fn add_subscriber(&mut self, subscriber: flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(Subscription::VT_SUBSCRIBER, subscriber);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> SubscriptionBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     SubscriptionBuilder {
@@ -542,7 +558,6 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> SubscriptionBuilder<'a, 'b, A> 
   #[inline]
   pub fn finish(self) -> flatbuffers::WIPOffset<Subscription<'a>> {
     let o = self.fbb_.end_table(self.start_);
-    self.fbb_.required(o, Subscription::VT_FILTER,"filter");
     flatbuffers::WIPOffset::new(o.value())
   }
 }
@@ -553,6 +568,7 @@ impl core::fmt::Debug for Subscription<'_> {
       ds.field("webhooks", &self.webhooks());
       ds.field("web_push_subscriptions", &self.web_push_subscriptions());
       ds.field("filter", &self.filter());
+      ds.field("subscriber", &self.subscriber());
       ds.finish()
   }
 }

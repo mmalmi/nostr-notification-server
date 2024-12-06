@@ -30,7 +30,6 @@ async fn test_info_endpoint(client: &Client) {
 async fn test_subscription_endpoints(client: &Client, push_port: u16, webhook_port: u16) {
     let (subscriber_keys, _) = get_test_keys_pair();
     let pubkey = subscriber_keys.public_key().to_string();
-    let base_url = format!("http://0.0.0.0:3030/subscriptions/{}", pubkey);
 
     // Generate browser keys for web push
     let browser_keys = generate_browser_keys();
@@ -48,13 +47,73 @@ async fn test_subscription_endpoints(client: &Client, push_port: u16, webhook_po
         }
     });
 
+    // Create subscription and get the ID from response
     let response = make_authed_request(
         client,
         reqwest::Method::POST,
-        &base_url,
-        Some(new_subscription)
+        "http://0.0.0.0:3030/subscriptions",
+        Some(new_subscription.clone())
     ).await;
     assert_eq!(response.status(), reqwest::StatusCode::CREATED);
+    
+    let created_response = response.json::<serde_json::Value>().await
+        .expect("Failed to parse JSON response");
+    let subscription_id = created_response["id"].as_str()
+        .expect("Response should contain subscription ID");
+
+    // Check that the subscription ID has a length greater than zero
+    assert!(!subscription_id.is_empty(), "Subscription ID should not be empty");
+
+    // Test GET /subscriptions/:id using the received ID
+    let get_url = format!("http://0.0.0.0:3030/subscriptions/{}", subscription_id);
+    let response = make_authed_request(
+        client,
+        reqwest::Method::GET,
+        &get_url,
+        None
+    ).await;
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    
+    let subscription = response.json::<serde_json::Value>().await
+        .expect("Failed to parse JSON response");
+    assert_eq!(subscription["webhooks"][0].as_str().unwrap(), 
+               format!("http://0.0.0.0:{}/webhook", webhook_port));
+
+    // Test GET /subscriptions (list all)
+    let response = make_authed_request(
+        client,
+        reqwest::Method::GET,
+        "http://0.0.0.0:3030/subscriptions",
+        None
+    ).await;
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    
+    let subscriptions = response.json::<serde_json::Map<String, serde_json::Value>>().await
+        .expect("Failed to parse JSON response");
+    assert_eq!(subscriptions.len(), 1);
+    assert!(subscriptions.contains_key(subscription_id));
+
+    // Test updating existing subscription
+    let updated_subscription = serde_json::json!({
+        "webhooks": [format!("http://0.0.0.0:{}/webhook", webhook_port)],
+        "web_push_subscriptions": [push_subscription],
+        "filter": {
+            "#p": [pubkey],
+            "kinds": [1],
+        }
+    });
+
+    println!("updated_subscription: {:?}", updated_subscription);
+    println!("url: {}", get_url);
+
+    let response = make_authed_request(
+        client,
+        reqwest::Method::POST,
+        &get_url,
+        Some(updated_subscription)
+    ).await;
+
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
 }
 
 async fn test_event_endpoint(
@@ -91,12 +150,7 @@ async fn test_event_endpoint(
 
     assert_eq!(response.status(), reqwest::StatusCode::OK);
 
-    // Add a small delay to ensure webhooks are processed
     sleep(Duration::from_millis(100)).await;
-
-    println!("Checking webhook results...");
-    let webhook_count = received_webhooks.lock().await.len();
-    println!("Current webhook count: {}", webhook_count);
 
     // Verify both push notification and webhook were received
     let pushes = received_pushes.lock().await;

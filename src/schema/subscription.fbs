@@ -22,7 +22,8 @@ table SubscriptionFilter {
 table Subscription {
     webhooks:[string];
     web_push_subscriptions:[WebPushSubscription];
-    filter:SubscriptionFilter (required);
+    filter:SubscriptionFilter;
+    subscriber:string;
 }
 
 root_type Subscription; 

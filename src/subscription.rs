@@ -20,6 +20,8 @@ pub struct Subscription {
     pub webhooks: Vec<String>,
     pub web_push_subscriptions: Vec<WebPushSubscription>,
     pub filter: SubscriptionFilter,
+    #[serde(default)]
+    pub subscriber: String,
 }
 
 impl Subscription {
@@ -86,6 +88,9 @@ impl Subscription {
     pub fn serialize(&self) -> Result<Vec<u8>, Box<dyn Error + Send + Sync>> {
         let mut builder = FlatBufferBuilder::new();
         
+        // Rename pubkey to subscriber
+        let subscriber = builder.create_string(&self.subscriber);
+        
         // Serialize webhooks
         let webhooks: Vec<_> = self.webhooks.iter()
             .map(|url| builder.create_string(url))
@@ -114,13 +119,14 @@ impl Subscription {
         // Serialize filter first
         let filter = self.serialize_filter(&mut builder)?;
         
-        // Create subscription
+        // Create subscription with pubkey
         let subscription = FbsSubscription::create(
             &mut builder,
             &SubscriptionArgs {
                 webhooks: Some(webhooks_vec),
                 web_push_subscriptions: Some(web_push_vec),
                 filter: Some(filter),
+                subscriber: Some(subscriber),
             }
         );
         
@@ -147,7 +153,7 @@ impl Subscription {
             })
             .unwrap_or_default();
             
-        let f = fbs.filter();
+        let f = fbs.filter().expect("Filter should always be present");
         let filter = SubscriptionFilter {
             ids: f.ids().map(|ids| ids.iter().map(|s| s.to_string()).collect()),
             authors: f.authors().map(|authors| authors.iter().map(|s| s.to_string()).collect()),
@@ -170,6 +176,7 @@ impl Subscription {
             webhooks,
             web_push_subscriptions,
             filter,
+            subscriber: fbs.subscriber().unwrap_or_default().to_string(),
         })
     }
 
@@ -190,7 +197,7 @@ impl Subscription {
 
     pub fn matches_event_filter_only(bytes: &[u8], event: &Event) -> Result<bool, Box<dyn Error + Send + Sync>> {
         let fbs = root_as_subscription(bytes)?;
-        let f = fbs.filter();
+        let f = fbs.filter().expect("Filter should always be present");
         
         let filter = SubscriptionFilter {
             ids: f.ids().map(|ids| ids.iter().map(|s| s.to_string()).collect()),

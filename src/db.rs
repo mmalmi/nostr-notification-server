@@ -10,8 +10,9 @@ use nostr_sdk::{PublicKey, FromBech32};
 
 pub struct DbHandler {
     pub env: Env,
-    pub db: Database<Str, Bytes>,
+    pub subscriptions: Database<Str, Bytes>,
     subscriptions_by_p_tag_and_id: Database<Str, Str>,
+    subscriptions_by_pubkey_and_id: Database<Str, Str>,
     pub social_graph: SocialGraph,
     pub profiles: ProfileHandler,
 }
@@ -27,12 +28,13 @@ impl DbHandler {
                 .open(&settings.db_path)?
         };
 
-        let (db, subscriptions_by_p_tag_and_id) = {
+        let (subscriptions, subscriptions_by_p_tag_and_id, subscriptions_by_pubkey_and_id) = {
             let mut wtxn = environment.write_txn()?;
-            let db = environment.create_database(&mut wtxn, Some("subscriptions"))?;
+            let subscriptions = environment.create_database(&mut wtxn, Some("subscriptions"))?;
             let subscriptions_by_p_tag_and_id = environment.create_database(&mut wtxn, Some("subscriptions_by_p_tag_and_id"))?;
+            let subscriptions_by_pubkey_and_id = environment.create_database(&mut wtxn, Some("subscriptions_by_pubkey_and_id"))?;
             wtxn.commit()?;
-            (db, subscriptions_by_p_tag_and_id)
+            (subscriptions, subscriptions_by_p_tag_and_id, subscriptions_by_pubkey_and_id)
         };
 
         let root_pubkey = &settings.social_graph_root_pubkey;
@@ -60,17 +62,45 @@ impl DbHandler {
 
         Ok(Self {
             env: environment,
-            db,
+            subscriptions,
             subscriptions_by_p_tag_and_id,
+            subscriptions_by_pubkey_and_id,
             social_graph,
             profiles,
         })
     }
 
-    pub fn get_subscription(&self, pubkey: &str) -> Result<Option<Subscription>, Box<dyn std::error::Error + Send + Sync>> {
+    pub fn get_subscriptions_for_pubkey(&self, pubkey: &str) -> Result<Vec<(String, Subscription)>, Box<dyn std::error::Error + Send + Sync>> {
+        let rtxn = self.env.read_txn()?;
+        let prefix = format!("{}:", pubkey);
+        
+        let subscriptions: Vec<(String, Subscription)> = self.subscriptions_by_pubkey_and_id
+            .prefix_iter(&rtxn, &prefix)?
+            .filter_map(|result| {
+                result.ok().and_then(|(key, _)| {
+                    // Extract subscription ID from the key (format: "pubkey:id")
+                    let id = key.split(':').nth(1)?;
+                    self.subscriptions.get(&rtxn, id).ok()?
+                        .map(|bytes| Subscription::deserialize(bytes).ok())
+                        .flatten()
+                        .map(|sub| (id.to_string(), sub))
+                })
+            })
+            .collect();
+
+        Ok(subscriptions)
+    }
+
+    pub fn get_subscription(&self, pubkey: &str, id: &str) -> Result<Option<Subscription>, Box<dyn std::error::Error + Send + Sync>> {
         let rtxn = self.env.read_txn()?;
         
-        match self.db.get(&rtxn, pubkey)? {
+        // First check if this subscription belongs to the pubkey
+        let index_key = format!("{}:{}", pubkey, id);
+        if !self.subscriptions_by_pubkey_and_id.get(&rtxn, &index_key)?.is_some() {
+            return Ok(None);
+        }
+        
+        match self.subscriptions.get(&rtxn, id)? {
             Some(bytes) => {
                 let subscription = Subscription::deserialize(bytes)?;
                 Ok(Some(subscription))
@@ -79,20 +109,48 @@ impl DbHandler {
         }
     }
 
-    pub fn save_subscription(&self, pubkey: &str, subscription: &Subscription) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    pub fn save_subscription(&self, pubkey: &str, id: &str, subscription: &Subscription) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut wtxn = self.env.write_txn()?;
+        
+        // For existing subscriptions, verify ownership
+        if self.subscriptions.get(&wtxn, id)?.is_some() {
+            let index_key = format!("{}:{}", pubkey, id);
+            if !self.subscriptions_by_pubkey_and_id.get(&wtxn, &index_key)?.is_some() {
+                return Err("Subscription not found or unauthorized".into());
+            }
+            
+            // Clean up old p-tag indices before update
+            if let Ok(Some(old_sub_bytes)) = self.subscriptions.get(&wtxn, id) {
+                if let Ok(old_sub) = Subscription::deserialize(old_sub_bytes) {
+                    if let Some(old_p_tags) = old_sub.filter.tags.get("#p") {
+                        for p_value in old_p_tags.iter() {
+                            let index_key = format!("{}:{}", p_value, id);
+                            self.subscriptions_by_p_tag_and_id.delete(&mut wtxn, &index_key)?;
+                        }
+                    }
+                }
+            }
+        }
+        
         let data = subscription.serialize()?;
-        self.db.put(&mut wtxn, pubkey, &data)?;
         
-        debug!("Saving subscription for pubkey: {}", pubkey);
+        // Save subscription by ID in main db
+        self.subscriptions.put(&mut wtxn, id, &data)?;
         
+        // Update pubkey index with composite key
+        let index_key = format!("{}:{}", pubkey, id);
+        self.subscriptions_by_pubkey_and_id.put(&mut wtxn, &index_key, "")?;
+        
+        debug!("Saving subscription with id: {}", id);
+        
+        // Update p-tag index
         if let Some(p_tags) = subscription.filter.tags.get("#p") {
             debug!("Found #p tags in subscription: {:?}", p_tags);
             for p_value in p_tags.iter() {
                 debug!("Processing p tag value: {}", p_value);
-                let composite_key = format!("{}:{}", p_value, pubkey);
-                self.subscriptions_by_p_tag_and_id.put(&mut wtxn, &composite_key, pubkey)?;
-                debug!("Added pubkey {} to p tag index with key {}", pubkey, composite_key);
+                let index_key = format!("{}:{}", p_value, id);
+                self.subscriptions_by_p_tag_and_id.put(&mut wtxn, &index_key, "")?;
+                debug!("Added subscription to p tag index with key {}", index_key);
             }
         }
         
@@ -100,29 +158,37 @@ impl DbHandler {
         Ok(())
     }
 
-    pub fn delete_subscription(&self, pubkey: &str) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+    pub fn delete_subscription(&self, pubkey: &str, id: &str) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
         let mut wtxn = self.env.write_txn()?;
-        let existed = self.db.delete(&mut wtxn, pubkey)?;
+        let existed = self.subscriptions.delete(&mut wtxn, id)?;
+        
+        // Clean up indices
+        let index_key = format!("{}:{}", pubkey, id);
+        self.subscriptions_by_pubkey_and_id.delete(&mut wtxn, &index_key)?;
+        
         wtxn.commit()?;
         Ok(existed)
     }
 
-    pub fn get_subscription_bytes(&self, pubkey: &str) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error + Send + Sync>> {
-        let rtxn = self.env.read_txn()?;
-        Ok(self.db.get(&rtxn, pubkey)?.map(|bytes| bytes.to_vec()))
-    }
-
-    pub fn get_p_tag_index(&self, p_value: &str) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
+    pub fn get_subscriptions_by_p_tag(&self, p_value: &str) -> Result<Vec<(String, Subscription)>, Box<dyn std::error::Error + Send + Sync>> {
         let rtxn = self.env.read_txn()?;
         let prefix = format!("{}:", p_value);
         
-        let subscriptions: Vec<String> = self.subscriptions_by_p_tag_and_id
+        let subscriptions: Vec<(String, Subscription)> = self.subscriptions_by_p_tag_and_id
             .prefix_iter(&rtxn, &prefix)?
-            .filter_map(|result| result.ok())
-            .map(|(_, pubkey)| pubkey.to_string())
+            .filter_map(|result| {
+                result.ok().and_then(|(key, _)| {
+                    // Extract subscription ID from the key (format: "p_tag:id")
+                    let id = key.split(':').nth(1)?;
+                    self.subscriptions.get(&rtxn, id).ok()?
+                        .map(|bytes| Subscription::deserialize(bytes).ok())
+                        .flatten()
+                        .map(|sub| (id.to_string(), sub))
+                })
+            })
             .collect();
 
-        debug!("Retrieved p tag index for {}: {:?}", p_value, subscriptions);
+        debug!("Retrieved subscriptions for p tag {}: {:?}", p_value, subscriptions.len());
         Ok(subscriptions)
     }
 
@@ -130,7 +196,7 @@ impl DbHandler {
         let rtxn = self.env.read_txn()?;
         
         let stats = DbStats {
-            subscriptions: self.db.stat(&rtxn)?.entries as u64,
+            subscriptions: self.subscriptions.stat(&rtxn)?.entries as u64,
             social_graph: self.social_graph.size_with_txn(&rtxn)? as u64,
             profiles: self.profiles.names.stat(&rtxn)?.entries as u64,
         };
