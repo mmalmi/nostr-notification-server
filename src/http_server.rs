@@ -7,6 +7,7 @@ use log::{info, error, debug};
 use nostr_sdk::Event;
 use std::convert::Infallible;
 use uuid::Uuid;
+use warp::cors::Cors;
 
 use crate::config::Settings;
 use crate::db::DbHandler;
@@ -14,6 +15,19 @@ use crate::auth::verify_nostr_auth;
 use crate::errors::{CustomRejection, clean_error_message};
 use crate::notifications::handle_incoming_event;
 use crate::subscription::Subscription;
+
+// Add this function to create CORS configuration
+fn cors() -> Cors {
+    warp::cors()
+        .allow_any_origin()
+        .allow_headers(vec![
+            "authorization",
+            "content-type",
+            "accept",
+        ])
+        .allow_methods(vec!["GET", "POST", "DELETE"])
+        .build()
+}
 
 pub async fn run_http_server(
     db_handler: Arc<DbHandler>,
@@ -129,6 +143,7 @@ pub async fn run_http_server(
         .or(delete_subscription)
         .or(events)
         .or(info)
+        .with(cors())
         .boxed()
         .recover(crate::errors::handle_rejection);
 
