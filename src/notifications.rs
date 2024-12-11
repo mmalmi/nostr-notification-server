@@ -32,11 +32,11 @@ pub async fn create_notification_payload(
 ) -> NotificationPayload {
     const MAX_BODY_LENGTH: usize = 140;
     
-    let event_type = match event.kind.as_u16() {
-        1 => "Mention",
-        4 | 1059 => "DM",
-        6 => "Repost",
-        7 => "Reaction",
+    let event_type = match event.kind {
+        Kind::TextNote => "Mention",
+        Kind::EncryptedDirectMessage | Kind::GiftWrap => "DM",
+        Kind::Repost => "Repost",
+        Kind::Reaction => "Reaction",
         _ => "Notification",
     };
 
