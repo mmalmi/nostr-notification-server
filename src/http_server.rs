@@ -306,6 +306,7 @@ async fn handle_root(
     })?;
 
     Ok(warp::reply::json(&serde_json::json!({
+        "version": env!("CARGO_PKG_VERSION"),
         "subscriptions": stats.subscriptions,
         "social_graph": stats.social_graph,
         "profiles": stats.profiles,

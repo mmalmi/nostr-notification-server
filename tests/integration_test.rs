@@ -114,6 +114,23 @@ async fn test_subscription_endpoints(client: &Client, push_port: u16, webhook_po
     ).await;
 
     assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+    let response = client
+        .get("http://0.0.0.0:3030")
+        .send()
+        .await
+        .expect("Failed to send request");
+
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+    let json_response = response.json::<serde_json::Value>().await
+        .expect("Failed to parse JSON response");
+
+    // subscription count should be greater than 0
+    assert!(json_response.get("subscriptions").is_some());
+    assert!(json_response["subscriptions"].as_u64().unwrap() > 0);
+    
+    assert_eq!(json_response["version"].as_str().unwrap(), env!("CARGO_PKG_VERSION"));
 }
 
 async fn test_event_endpoint(
