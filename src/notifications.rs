@@ -104,6 +104,11 @@ pub async fn handle_incoming_event(
     debug!("Processing event with kind: {} and content: {}", event.kind, 
            &event.content.chars().take(50).collect::<String>());
     
+    // Process author subscriptions
+    let author = event.pubkey.to_hex();
+    process_author(&author, event, &db_handler, settings).await?;
+
+    // Process p-tag subscriptions
     for tag in event.tags.iter() {
         if let Some(p_value) = extract_p_tag_value(tag) {
             let tag_start = Instant::now();
@@ -113,6 +118,44 @@ pub async fn handle_incoming_event(
     }
     
     debug!("Total event processing took: {:?}", start.elapsed());
+    Ok(())
+}
+
+async fn process_author(
+    author: &str,
+    event: &Event,
+    db_handler: &Arc<DbHandler>,
+    settings: &Settings,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    debug!("Processing author: {} for event: {}", author, event.id);
+    
+    let subscriptions = db_handler.get_subscriptions_by_author(author)?;
+    if subscriptions.is_empty() {
+        debug!("No subscriptions found for author: {}", author);
+        return Ok(());
+    }
+    
+    debug!("Found {} subscriptions for author: {}", subscriptions.len(), author);
+    
+    for (_subscription_id, subscription) in subscriptions {
+        debug!("Processing subscription: {:?}", subscription);
+        if subscription.matches_event(event) {
+            let event_clone = event.clone();
+            let settings_clone = settings.clone();
+            let db_handler_clone = db_handler.clone();
+
+            tokio::spawn(async move {
+                if let Err(e) = send_notifications(
+                    subscription, 
+                    event_clone, 
+                    Arc::new(settings_clone), 
+                    db_handler_clone
+                ).await {
+                    error!("Failed to send notification: {}", e);
+                }
+            });
+        }
+    }
     Ok(())
 }
 

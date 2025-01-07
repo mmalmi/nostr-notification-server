@@ -13,6 +13,7 @@ pub struct DbHandler {
     pub subscriptions: Database<Str, Bytes>,
     subscriptions_by_p_tag_and_id: Database<Str, Str>,
     subscriptions_by_pubkey_and_id: Database<Str, Str>,
+    subscriptions_by_author_and_id: Database<Str, Str>,
     pub social_graph: SocialGraph,
     pub profiles: ProfileHandler,
 }
@@ -28,13 +29,14 @@ impl DbHandler {
                 .open(&settings.db_path)?
         };
 
-        let (subscriptions, subscriptions_by_p_tag_and_id, subscriptions_by_pubkey_and_id) = {
+        let (subscriptions, subscriptions_by_p_tag_and_id, subscriptions_by_pubkey_and_id, subscriptions_by_author_and_id) = {
             let mut wtxn = environment.write_txn()?;
             let subscriptions = environment.create_database(&mut wtxn, Some("subscriptions"))?;
             let subscriptions_by_p_tag_and_id = environment.create_database(&mut wtxn, Some("subscriptions_by_p_tag_and_id"))?;
             let subscriptions_by_pubkey_and_id = environment.create_database(&mut wtxn, Some("subscriptions_by_pubkey_and_id"))?;
+            let subscriptions_by_author_and_id = environment.create_database(&mut wtxn, Some("subscriptions_by_author_and_id"))?;
             wtxn.commit()?;
-            (subscriptions, subscriptions_by_p_tag_and_id, subscriptions_by_pubkey_and_id)
+            (subscriptions, subscriptions_by_p_tag_and_id, subscriptions_by_pubkey_and_id, subscriptions_by_author_and_id)
         };
 
         let root_pubkey = &settings.social_graph_root_pubkey;
@@ -65,6 +67,7 @@ impl DbHandler {
             subscriptions,
             subscriptions_by_p_tag_and_id,
             subscriptions_by_pubkey_and_id,
+            subscriptions_by_author_and_id,
             social_graph,
             profiles,
         })
@@ -112,20 +115,28 @@ impl DbHandler {
     pub fn save_subscription(&self, pubkey: &str, id: &str, subscription: &Subscription) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut wtxn = self.env.write_txn()?;
         
-        // For existing subscriptions, verify ownership
+        // For existing subscriptions, verify ownership and clean up old indices
         if self.subscriptions.get(&wtxn, id)?.is_some() {
             let index_key = format!("{}:{}", pubkey, id);
             if !self.subscriptions_by_pubkey_and_id.get(&wtxn, &index_key)?.is_some() {
                 return Err("Subscription not found or unauthorized".into());
             }
             
-            // Clean up old p-tag indices before update
+            // Clean up old indices
             if let Ok(Some(old_sub_bytes)) = self.subscriptions.get(&wtxn, id) {
                 if let Ok(old_sub) = Subscription::deserialize(old_sub_bytes) {
+                    // Clean up old p-tag indices
                     if let Some(old_p_tags) = old_sub.filter.tags.get("#p") {
                         for p_value in old_p_tags.iter() {
                             let index_key = format!("{}:{}", p_value, id);
                             self.subscriptions_by_p_tag_and_id.delete(&mut wtxn, &index_key)?;
+                        }
+                    }
+                    // Clean up old author indices
+                    if let Some(authors) = old_sub.filter.authors {
+                        for author in authors.iter() {
+                            let index_key = format!("{}:{}", author, id);
+                            self.subscriptions_by_author_and_id.delete(&mut wtxn, &index_key)?;
                         }
                     }
                 }
@@ -151,6 +162,15 @@ impl DbHandler {
                 let index_key = format!("{}:{}", p_value, id);
                 self.subscriptions_by_p_tag_and_id.put(&mut wtxn, &index_key, "")?;
                 debug!("Added subscription to p tag index with key {}", index_key);
+            }
+        }
+        
+        // Add author indices
+        if let Some(authors) = &subscription.filter.authors {
+            for author in authors.iter() {
+                let index_key = format!("{}:{}", author, id);
+                self.subscriptions_by_author_and_id.put(&mut wtxn, &index_key, "")?;
+                debug!("Added subscription to author index with key {}", index_key);
             }
         }
         
@@ -203,6 +223,28 @@ impl DbHandler {
 
         rtxn.commit()?;
         Ok(stats)
+    }
+
+    pub fn get_subscriptions_by_author(&self, author: &str) -> Result<Vec<(String, Subscription)>, Box<dyn std::error::Error + Send + Sync>> {
+        let rtxn = self.env.read_txn()?;
+        let prefix = format!("{}:", author);
+        
+        let subscriptions: Vec<(String, Subscription)> = self.subscriptions_by_author_and_id
+            .prefix_iter(&rtxn, &prefix)?
+            .filter_map(|result| {
+                result.ok().and_then(|(key, _)| {
+                    // Extract subscription ID from the key (format: "author:id")
+                    let id = key.split(':').nth(1)?;
+                    self.subscriptions.get(&rtxn, id).ok()?
+                        .map(|bytes| Subscription::deserialize(bytes).ok())
+                        .flatten()
+                        .map(|sub| (id.to_string(), sub))
+                })
+            })
+            .collect();
+
+        debug!("Retrieved subscriptions for author {}: {:?}", author, subscriptions.len());
+        Ok(subscriptions)
     }
 }
 
