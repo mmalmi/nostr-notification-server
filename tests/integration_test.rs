@@ -133,6 +133,59 @@ async fn test_subscription_endpoints(client: &Client, push_port: u16, webhook_po
     assert_eq!(json_response["version"].as_str().unwrap(), env!("CARGO_PKG_VERSION"));
 }
 
+async fn test_author_subscription_endpoints(client: &Client, push_port: u16, webhook_port: u16) {
+    let (_subscriber_keys, author_keys) = get_test_keys_pair();
+    let author_pubkey = author_keys.public_key().to_string();
+
+    // Generate browser keys for web push
+    let browser_keys = generate_browser_keys();
+    let push_subscription = create_push_subscription(
+        &browser_keys,
+        &format!("http://0.0.0.0:{}/push", push_port)
+    );
+
+    // Test POST /subscriptions with author filter
+    let new_subscription = serde_json::json!({
+        "webhooks": [format!("http://0.0.0.0:{}/webhook", webhook_port)],
+        "web_push_subscriptions": [push_subscription],
+        "filter": {
+            "authors": [author_pubkey],
+            "kinds": [4]
+        }
+    });
+
+    // Create subscription and get the ID from response
+    let response = make_authed_request(
+        client,
+        reqwest::Method::POST,
+        "http://0.0.0.0:3030/subscriptions",
+        Some(new_subscription.clone())
+    ).await;
+    assert_eq!(response.status(), reqwest::StatusCode::CREATED);
+    
+    let created_response = response.json::<serde_json::Value>().await
+        .expect("Failed to parse JSON response");
+    let subscription_id = created_response["id"].as_str()
+        .expect("Response should contain subscription ID");
+
+    // Verify subscription was created correctly
+    let get_url = format!("http://0.0.0.0:3030/subscriptions/{}", subscription_id);
+    let response = make_authed_request(
+        client,
+        reqwest::Method::GET,
+        &get_url,
+        None
+    ).await;
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    
+    let subscription = response.json::<serde_json::Value>().await
+        .expect("Failed to parse JSON response");
+    
+    // Verify the filter contains correct author and kind
+    assert_eq!(subscription["filter"]["authors"][0].as_str().unwrap(), author_pubkey);
+    assert_eq!(subscription["filter"]["kinds"][0].as_i64().unwrap(), 4);
+}
+
 async fn test_event_endpoint(
     client: &Client, 
     received_pushes: Arc<Mutex<Vec<serde_json::Value>>>,
@@ -201,7 +254,7 @@ async fn test_integration() {
 
     test_info_endpoint(&client).await;
     test_subscription_endpoints(&client, push_port, webhook_port).await;
-    
+    test_author_subscription_endpoints(&client, push_port, webhook_port).await;
     test_event_endpoint(&client, received_pushes, received_webhooks).await;
 
     // Send SIGTERM to the child process

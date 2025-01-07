@@ -24,8 +24,23 @@ fn cors() -> Cors {
             "authorization",
             "content-type",
             "accept",
+            "origin",
+            "access-control-request-method",
+            "access-control-request-headers",
+            "sec-fetch-dest",
+            "sec-fetch-mode",
+            "sec-fetch-site",
+            "sec-gpc",
+            "priority",
+            "accept-encoding",
+            "accept-language",
+            "content-length",
+            "user-agent",
+            "referer",
         ])
-        .allow_methods(vec!["GET", "POST", "DELETE"])
+        .allow_methods(vec!["GET", "POST", "DELETE", "OPTIONS"])
+        .max_age(86400) // 24 hours
+        .expose_headers(vec!["content-type", "content-length"])
         .build()
 }
 
