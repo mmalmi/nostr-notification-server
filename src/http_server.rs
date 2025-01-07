@@ -75,6 +75,11 @@ pub async fn run_http_server(
         .and_then(move |auth_header: Option<String>, path: FullPath, method: Method| {
             let base_url = base_url.clone();
             async move {
+                // Skip auth check for OPTIONS requests
+                if method == Method::OPTIONS {
+                    return Ok(String::new());  // Empty string as pubkey for OPTIONS
+                }
+
                 // First check if auth header exists
                 let auth_str = auth_header.ok_or_else(|| {
                     warp::reject::custom(CustomRejection {
