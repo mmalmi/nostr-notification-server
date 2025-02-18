@@ -181,6 +181,9 @@ impl Subscription {
     }
 
     pub fn matches_event(&self, event: &Event) -> bool {
+        if event.pubkey.to_hex() == self.subscriber {
+            return false;
+        }
         self.filter.matches_event(event)
     }
 
