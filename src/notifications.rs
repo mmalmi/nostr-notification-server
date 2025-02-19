@@ -241,23 +241,25 @@ pub async fn send_notifications(
         }));
     }
 
-    let mut subscriptions_to_remove = Vec::new();
+    let mut endpoints_to_remove = Vec::new();
     for task in tasks {
         match task.await? {
             Ok(Some(endpoint)) => {
-                subscriptions_to_remove.push(endpoint);
+                endpoints_to_remove.push(endpoint);
             }
             _ => {}
         }
     }
 
-    if !subscriptions_to_remove.is_empty() {
+    if !endpoints_to_remove.is_empty() {
         subscription.web_push_subscriptions.retain(|sub| 
-            !subscriptions_to_remove.contains(&sub.endpoint)
+            !endpoints_to_remove.contains(&sub.endpoint)
         );
-        
-        if let Some(subscriber) = subscription.filter.tags.get("#p").and_then(|p| p.first()) {
-            db_handler.save_subscription(subscriber, subscription_id, &subscription)?;
+
+        if subscription.is_empty() {
+            db_handler.delete_subscription(&subscription.subscriber, subscription_id)?;
+        } else {
+            db_handler.save_subscription(&subscription.subscriber, subscription_id, &subscription)?;
         }
     }
 

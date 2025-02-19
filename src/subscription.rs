@@ -85,6 +85,10 @@ impl Subscription {
         ))
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.webhooks.is_empty() && self.web_push_subscriptions.is_empty()
+    }
+
     pub fn serialize(&self) -> Result<Vec<u8>, Box<dyn Error + Send + Sync>> {
         let mut builder = FlatBufferBuilder::new();
         
