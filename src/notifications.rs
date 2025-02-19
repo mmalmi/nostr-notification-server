@@ -256,11 +256,13 @@ pub async fn send_notifications(
             !endpoints_to_remove.contains(&sub.endpoint)
         );
 
-        if subscription.is_empty() {
-            db_handler.delete_subscription(&subscription.subscriber, subscription_id)?;
-        } else {
+        if !subscription.is_empty() {
             db_handler.save_subscription(&subscription.subscriber, subscription_id, &subscription)?;
         }
+    }
+
+    if subscription.is_empty() {
+        db_handler.delete_subscription(&subscription.subscriber, subscription_id)?;
     }
 
     Ok(())
