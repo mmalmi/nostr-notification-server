@@ -245,6 +245,82 @@ async fn test_event_endpoint(
     assert!(webhook_payload["url"].as_str().unwrap().contains("https://iris.to/note1"));
 }
 
+async fn test_failed_push_endpoint_removal(
+    client: &Client,
+    push_port: u16,
+    webhook_port: u16
+) {
+    let (subscriber_keys, author_keys) = get_test_keys_pair();
+    let pubkey = subscriber_keys.public_key().to_string();
+
+    // Generate browser keys for web push
+    let browser_keys = generate_browser_keys();
+    
+    // Create two push subscriptions - one valid, one with invalid endpoint
+    let valid_push = create_push_subscription(
+        &browser_keys,
+        &format!("http://0.0.0.0:{}/push", push_port)
+    );
+    
+    let invalid_push = create_push_subscription(
+        &browser_keys,
+        &format!("http://0.0.0.0:{}/non-existent", push_port) // This will return 404
+    );
+
+    // Create subscription with both endpoints
+    let new_subscription = serde_json::json!({
+        "webhooks": [format!("http://0.0.0.0:{}/webhook", webhook_port)],
+        "web_push_subscriptions": [valid_push.clone(), invalid_push.clone()],
+        "filter": {
+            "#p": [pubkey.clone()]
+        }
+    });
+
+    // Create subscription
+    let response = make_authed_request(
+        client,
+        reqwest::Method::POST,
+        "http://0.0.0.0:3030/subscriptions",
+        Some(new_subscription)
+    ).await;
+    
+    assert_eq!(response.status(), reqwest::StatusCode::CREATED);
+    let subscription_id = response.json::<serde_json::Value>().await
+        .unwrap()["id"].as_str().unwrap().to_string();
+
+    // Create and send test event
+    let event = create_test_event(&author_keys, &pubkey);
+    
+    client.post("http://0.0.0.0:3030/events")
+        .json(&event)
+        .send()
+        .await
+        .expect("Failed to send event");
+
+    // Wait a bit for processing
+    sleep(Duration::from_millis(100)).await;
+
+    // Verify subscription was updated
+    let response = make_authed_request(
+        client,
+        reqwest::Method::GET,
+        &format!("http://0.0.0.0:3030/subscriptions/{}", subscription_id),
+        None
+    ).await;
+    
+    let subscription = response.json::<serde_json::Value>().await.unwrap();
+
+    println!("Subscription after event: {:?}", subscription);
+    let push_subs = subscription["web_push_subscriptions"].as_array().unwrap();
+    
+    assert_eq!(push_subs.len(), 1, "Should have removed invalid subscription");
+    assert_eq!(
+        push_subs[0]["endpoint"].as_str().unwrap(),
+        valid_push.endpoint,
+        "Should keep valid subscription"
+    );
+}
+
 #[tokio::test]
 async fn test_integration() {
     let mut child = start_server().await;
@@ -256,6 +332,7 @@ async fn test_integration() {
     test_subscription_endpoints(&client, push_port, webhook_port).await;
     test_author_subscription_endpoints(&client, push_port, webhook_port).await;
     test_event_endpoint(&client, received_pushes, received_webhooks).await;
+    test_failed_push_endpoint_removal(&client, push_port, webhook_port).await;
 
     // Send SIGTERM to the child process
     child.kill().await.expect("Failed to send signal to process");

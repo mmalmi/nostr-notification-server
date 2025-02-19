@@ -137,16 +137,18 @@ async fn process_author(
     
     debug!("Found {} subscriptions for author: {}", subscriptions.len(), author);
     
-    for (_subscription_id, subscription) in subscriptions {
+    for (subscription_id, subscription) in subscriptions {
         debug!("Processing subscription: {:?}", subscription);
         if subscription.matches_event(event) {
             let event_clone = event.clone();
             let settings_clone = settings.clone();
             let db_handler_clone = db_handler.clone();
+            let subscription_id = subscription_id.clone();
 
             tokio::spawn(async move {
                 if let Err(e) = send_notifications(
-                    subscription, 
+                    subscription,
+                    &subscription_id,  // Pass the ID here
                     event_clone, 
                     Arc::new(settings_clone), 
                     db_handler_clone
@@ -184,16 +186,18 @@ async fn process_p_tag(
     
     debug!("Found {} subscriptions for p_tag: {}", subscriptions.len(), p_value);
     
-    for (_subscription_id, subscription) in subscriptions {
+    for (subscription_id, subscription) in subscriptions {
         debug!("Processing subscription: {:?}", subscription);
         if subscription.matches_event(event) {
             let event_clone = event.clone();
             let settings_clone = settings.clone();
             let db_handler_clone = db_handler.clone();
+            let subscription_id = subscription_id.clone();
 
             tokio::spawn(async move {
                 if let Err(e) = send_notifications(
-                    subscription, 
+                    subscription,
+                    &subscription_id,  // Pass the ID here
                     event_clone, 
                     Arc::new(settings_clone), 
                     db_handler_clone
@@ -207,7 +211,8 @@ async fn process_p_tag(
 }
 
 pub async fn send_notifications(
-    subscription: Subscription, 
+    mut subscription: Subscription, 
+    subscription_id: &str,
     event: Event,
     settings: Arc<Settings>,
     db_handler: Arc<DbHandler>,
@@ -215,25 +220,44 @@ pub async fn send_notifications(
     let mut tasks = Vec::new();
     let payload = create_notification_payload(&event, &settings, &db_handler).await;
 
-    for webhook_url in subscription.webhooks {
+    for webhook_url in subscription.webhooks.clone() {
         let payload = payload.clone();
         tasks.push(tokio::spawn(async move {
-            println!("Sending webhook to: {}", webhook_url);
-            send_webhook(&webhook_url, &payload).await
+            send_webhook(&webhook_url, &payload).await.map(|_| None)
         }));
     }
 
-    for push_sub in subscription.web_push_subscriptions {
+    for push_sub in subscription.web_push_subscriptions.clone() {
         let payload = payload.clone();
         let settings = settings.clone();
         tasks.push(tokio::spawn(async move {
-            send_web_push(&push_sub, &payload, &settings).await
+            send_web_push(&push_sub, &payload, &settings).await.map(|should_remove| {
+                if should_remove {
+                    Some(push_sub.endpoint)
+                } else {
+                    None
+                }
+            })
         }));
     }
 
+    let mut subscriptions_to_remove = Vec::new();
     for task in tasks {
-        if let Err(e) = task.await? {
-            error!("Notification error: {}", e);
+        match task.await? {
+            Ok(Some(endpoint)) => {
+                subscriptions_to_remove.push(endpoint);
+            }
+            _ => {}
+        }
+    }
+
+    if !subscriptions_to_remove.is_empty() {
+        subscription.web_push_subscriptions.retain(|sub| 
+            !subscriptions_to_remove.contains(&sub.endpoint)
+        );
+        
+        if let Some(subscriber) = subscription.filter.tags.get("#p").and_then(|p| p.first()) {
+            db_handler.save_subscription(subscriber, subscription_id, &subscription)?;
         }
     }
 

@@ -5,6 +5,7 @@ use web_push::{
     SubscriptionInfo,
     IsahcWebPushClient,
     WebPushClient,
+    WebPushError,
 };
 use serde::{Deserialize, Serialize};
 use log::{error, info, debug};
@@ -41,7 +42,7 @@ pub async fn send_web_push(
     subscription: &WebPushSubscription, 
     payload: &NotificationPayload,
     settings: &Settings,
-) -> Result<(), Box<dyn Error + Send + Sync>> {
+) -> Result<bool, Box<dyn Error + Send + Sync>> {
     info!("Sending web push notification{}", payload.event
         .as_ref()
         .map(|event| format!(" for event: {}", event.id))
@@ -90,11 +91,21 @@ pub async fn send_web_push(
 
     debug!("Sending push notification to endpoint: {}", subscription.endpoint);
     let client = IsahcWebPushClient::new()?;
-    client.send(message).await.map_err(|e| {
-        error!("Failed to send push notification: {}", e);
-        e
-    })?;
+    let result = client.send(message).await;
 
-    info!("Web push notification sent successfully");
-    Ok(())
+    match result {
+        Ok(response) => {
+            debug!("Push notification response: {:?}", response);
+            info!("Web push notification sent successfully");
+            Ok(false)
+        }
+        Err(e) => {
+            let should_remove = matches!(e, 
+                WebPushError::EndpointNotValid | 
+                WebPushError::EndpointNotFound
+            );
+            info!("Failed to send push notification: {}", e);
+            Ok(should_remove)
+        }
+    }
 } 

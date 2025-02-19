@@ -10,7 +10,7 @@ use warp::Filter;
 use std::fs;
 use std::collections::HashMap;
 use bytes;
-use nostr_sdk::nostr::{Keys, Kind, Tag, Timestamp, SecretKey, UnsignedEvent};
+use nostr_sdk::nostr::{Keys, Kind, Tag, Timestamp, SecretKey, UnsignedEvent, Event};
 use p256::{
     ecdh::EphemeralSecret,
     PublicKey,
@@ -82,7 +82,8 @@ pub async fn start_mock_push_server() -> (u16, Arc<Mutex<Vec<serde_json::Value>>
     let received_pushes = Arc::new(Mutex::new(Vec::new()));
     let received_pushes_clone = received_pushes.clone();
 
-    let routes = warp::post()
+    let push_route = warp::post()
+        .and(warp::path("push"))
         .and(warp::header::headers_cloned())
         .and(warp::body::bytes())
         .map(move |headers: warp::http::HeaderMap, body: bytes::Bytes| {
@@ -105,6 +106,17 @@ pub async fn start_mock_push_server() -> (u16, Arc<Mutex<Vec<serde_json::Value>>
                 warp::http::StatusCode::CREATED,
             )
         });
+
+    // Add a catch-all route that returns 404
+    let not_found = warp::any()
+        .map(|| {
+            warp::reply::with_status(
+                warp::reply::json(&"Not Found"),
+                warp::http::StatusCode::NOT_FOUND,
+            )
+        });
+
+    let routes = push_route.or(not_found);
 
     let (addr, server) = warp::serve(routes)
         .bind_ephemeral(([127, 0, 0, 1], 0));
@@ -223,4 +235,17 @@ pub fn create_push_subscription(browser_keys: &BrowserKeys, endpoint: &str) -> W
         p256dh: encode_config(browser_keys.public_key.to_sec1_bytes(), URL_SAFE_NO_PAD),
         auth: encode_config(browser_keys.auth_secret, URL_SAFE_NO_PAD),
     }
+}
+
+pub fn create_test_event(sender_keys: &Keys, recipient_pubkey: &str) -> Event {
+    let unsigned_event = UnsignedEvent::new(
+        sender_keys.public_key(),
+        Timestamp::now(),
+        Kind::from(1),
+        vec![Tag::public_key(nostr_sdk::PublicKey::from_hex(recipient_pubkey).unwrap())],
+        "Test content".to_string(),
+    );
+
+    unsigned_event.sign(sender_keys)
+        .expect("Failed to sign event")
 } 
