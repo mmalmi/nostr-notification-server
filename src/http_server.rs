@@ -232,6 +232,13 @@ async fn handle_post_subscription(
     auth_pubkey: String,
     mut subscription: Subscription,
 ) -> Result<impl Reply, Rejection> {
+    if subscription.is_empty() {
+        return Err(warp::reject::custom(CustomRejection {
+            message: "Subscription must contain at least one webhook or web push subscription".to_string(),
+            error_type: "ValidationError".to_string(),
+        }));
+    }
+
     let id = Uuid::new_v4().to_string();
     
     // Set the subscriber to match the authenticated user
