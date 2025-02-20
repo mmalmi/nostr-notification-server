@@ -321,6 +321,49 @@ async fn test_failed_push_endpoint_removal(
     );
 }
 
+async fn test_auth_failures(client: &Client, _push_port: u16, webhook_port: u16) {
+    let (subscriber_keys, _) = get_test_keys_pair();
+    let pubkey = subscriber_keys.public_key().to_string();
+
+    // Create a test subscription payload
+    let new_subscription = serde_json::json!({
+        "webhooks": [format!("http://0.0.0.0:{}/webhook", webhook_port)],
+        "web_push_subscriptions": [],
+        "filter": {
+            "#p": [pubkey]
+        }
+    });
+
+    // Test with missing authorization header
+    let response = client
+        .post("http://0.0.0.0:3030/subscriptions")
+        .json(&new_subscription)
+        .send()
+        .await
+        .expect("Failed to send request");
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    // Test with invalid authorization header format
+    let response = client
+        .post("http://0.0.0.0:3030/subscriptions/123")
+        .header("Authorization", "InvalidFormat")
+        .json(&new_subscription)
+        .send()
+        .await
+        .expect("Failed to send request");
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    // Test with invalid signature
+    let response = client
+        .post("http://0.0.0.0:3030/subscriptions")
+        .header("Authorization", "Nostr AValidButIncorrectSignatureHere")
+        .json(&new_subscription)
+        .send()
+        .await
+        .expect("Failed to send request");
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
 #[tokio::test]
 async fn test_integration() {
     let mut child = start_server().await;
@@ -334,6 +377,7 @@ async fn test_integration() {
     test_event_endpoint(&client, received_pushes, received_webhooks).await;
     test_failed_push_endpoint_removal(&client, push_port, webhook_port).await;
     test_subscription_cors(&client, push_port, webhook_port).await;
+    test_auth_failures(&client, push_port, webhook_port).await;
 
     // Send SIGTERM to the child process
     child.kill().await.expect("Failed to send signal to process");
