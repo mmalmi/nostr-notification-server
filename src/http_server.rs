@@ -163,9 +163,9 @@ pub async fn run_http_server(
         .or(delete_subscription)
         .or(events)
         .or(info)
-        .with(cors())
         .boxed()
-        .recover(crate::errors::handle_rejection);
+        .recover(crate::errors::handle_rejection)
+        .with(cors());
 
     // Create server
     let (addr, server) = warp::serve(routes)

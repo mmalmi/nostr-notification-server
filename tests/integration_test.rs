@@ -1,4 +1,3 @@
-use reqwest::Client;
 use std::fs;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -7,6 +6,7 @@ use nostr_sdk::UnsignedEvent;
 use tokio::time::sleep;
 use std::time::Duration;
 use log::debug;
+use reqwest::{Client, Method, StatusCode};
 
 #[path = "common.rs"]
 mod common;
@@ -333,6 +333,7 @@ async fn test_integration() {
     test_author_subscription_endpoints(&client, push_port, webhook_port).await;
     test_event_endpoint(&client, received_pushes, received_webhooks).await;
     test_failed_push_endpoint_removal(&client, push_port, webhook_port).await;
+    test_subscription_cors(&client, push_port, webhook_port).await;
 
     // Send SIGTERM to the child process
     child.kill().await.expect("Failed to send signal to process");
@@ -340,4 +341,80 @@ async fn test_integration() {
     
     // Clean up test directory after test
     let _ = fs::remove_dir_all("test_db");
+}
+
+// Move the test function here but make it a regular async function
+async fn test_subscription_cors(client: &Client, push_port: u16, webhook_port: u16) {
+    let (subscriber_keys, _) = get_test_keys_pair();
+    let pubkey = subscriber_keys.public_key().to_string();
+
+    // Generate browser keys for web push
+    let browser_keys = generate_browser_keys();
+    let push_subscription = create_push_subscription(
+        &browser_keys,
+        &format!("http://0.0.0.0:{}/push", push_port)
+    );
+
+    let new_subscription = serde_json::json!({
+        "webhooks": [format!("http://0.0.0.0:{}/webhook", webhook_port)],
+        "web_push_subscriptions": [push_subscription],
+        "filter": {
+            "#p": [pubkey]
+        }
+    });
+
+    // 1. Test POST new subscription with CORS
+    let response = make_authed_request_with_keys(
+        &client,
+        Method::POST,
+        "http://0.0.0.0:3030/subscriptions",
+        Some(new_subscription),
+        &subscriber_keys,
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let created = response.json::<serde_json::Value>().await.unwrap();
+    let subscription_id = created["id"].as_str().unwrap();
+
+    // 2. Test GET subscription with CORS
+    let get_url = format!("http://0.0.0.0:3030/subscriptions/{}", subscription_id);
+    let response = make_authed_request_with_keys(
+        &client,
+        Method::GET,
+        &get_url,
+        None,
+        &subscriber_keys,
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // 3. Test OPTIONS preflight for subscription update
+    let response = client
+        .request(Method::OPTIONS, &get_url)
+        .header("Access-Control-Request-Method", "POST")
+        .header("Access-Control-Request-Headers", "authorization, content-type")
+        .header("Origin", "*")
+        .send()
+        .await
+        .expect("Failed to send preflight OPTIONS request");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let headers = response.headers();
+    assert_eq!(
+        headers.get("access-control-allow-origin").unwrap().to_str().unwrap(),
+        "*"
+    );
+    assert!(
+        headers.get("access-control-allow-methods").unwrap().to_str().unwrap()
+            .split(",").any(|m| m.trim() == "POST"),
+        "Should allow POST method"
+    );
+    assert!(
+        headers.get("access-control-allow-headers").unwrap().to_str().unwrap()
+            .split(",").any(|h| h.trim().eq_ignore_ascii_case("authorization")),
+        "Should allow Authorization header"
+    );
 }
