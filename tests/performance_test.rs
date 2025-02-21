@@ -121,7 +121,7 @@ async fn test_subscription_matching_performance() {
     let (webhook_port, received_webhooks) = start_mock_webhook_server().await;
 
     // Create target subscription that should match our event
-    let (subscriber_keys, sender_keys) = get_test_keys_pair();
+    let (subscriber_keys, sender_keys) = get_test_keys_pair(0);
     let target_pubkey = subscriber_keys.public_key().to_string();
 
     println!("\n=== Setup Phase ===");

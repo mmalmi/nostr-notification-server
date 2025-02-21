@@ -27,13 +27,16 @@ pub struct WebPushSubscription {
     pub p256dh: String,
 }
 
-pub fn get_test_keys_pair() -> (Keys, Keys) {
-    let secret_key1 = SecretKey::from_hex(
-        "1234567890123456789012345678901234567890123456789012345678901234"
-    ).expect("Invalid secret key");
-    let secret_key2 = SecretKey::from_hex(
-        "4321432143214321432143214321432143214321432143214321432143214321"
-    ).expect("Invalid secret key");
+pub fn get_test_keys_pair(modifier: u8) -> (Keys, Keys) {
+    let base_key1 = "1234567890123456789012345678901234567890123456789012345678901234";
+    let base_key2 = "4321432143214321432143214321432143214321432143214321432143214321";
+    
+    // Modify the last byte of each key based on the modifier
+    let key1 = format!("{}{:02x}", &base_key1[..62], modifier);
+    let key2 = format!("{}{:02x}", &base_key2[..62], modifier.wrapping_add(1));
+
+    let secret_key1 = SecretKey::from_hex(&key1).expect("Invalid secret key");
+    let secret_key2 = SecretKey::from_hex(&key2).expect("Invalid secret key");
     (Keys::new(secret_key1), Keys::new(secret_key2))
 }
 
