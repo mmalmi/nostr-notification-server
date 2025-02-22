@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
 use crate::unique_ids::{UniqueIds, UID};
 use heed::types::*;
 use heed::{Database, Env};
@@ -99,46 +99,51 @@ impl SocialGraph {
         Ok(())
     }
 
-    pub fn recalculate_follow_distances(&self) -> Result<(), SocialGraphError> {
-        let mut wtxn = self.env.write_txn()?;
-        
-        // Clear existing distances
-        self.follow_distance_by_user.clear(&mut wtxn)?;
-        self.users_by_follow_distance.clear(&mut wtxn)?;
-        
-        // Set root distance to 0
-        self.follow_distance_by_user.put(&mut wtxn, &self.root, &0)?;
-        let mut root_users = HashSet::new();
-        root_users.insert(self.root);
-        self.users_by_follow_distance.put(&mut wtxn, &0, &root_users)?;
-        
-        let mut queue = vec![self.root];
-        
-        while let Some(user) = queue.pop() {
-            let distance = self.follow_distance_by_user.get(&wtxn, &user)?.unwrap_or(0);
 
-            if let Some(followed_users) = self.followed_by_user.get(&wtxn, &user.to_string())? {
-                for &followed in &followed_users {
-                    if self.follow_distance_by_user.get(&wtxn, &followed)?.is_none() {
+    pub fn recalculate_follow_distances(&self) -> Result<(), SocialGraphError> {
+        // Step 1: Compute distances in-memory using a BFS
+        let mut distances: HashMap<UID, u32> = HashMap::new();
+        let mut users_by_distance: HashMap<u32, HashSet<UID>> = HashMap::new();
+        
+        distances.insert(self.root, 0);
+        users_by_distance.entry(0).or_default().insert(self.root);
+        
+        let mut queue = VecDeque::new();
+        queue.push_back(self.root);
+        
+        // Use a short-lived read transaction for lookups
+        let rtxn = self.env.read_txn()?;
+        while let Some(user) = queue.pop_front() {
+            let distance = distances[&user];
+            if let Some(followed_users) = self.followed_by_user.get(&rtxn, &user.to_string())? {
+                for &followed in followed_users.iter() {
+                    if !distances.contains_key(&followed) {
                         let new_distance = distance + 1;
-                        self.follow_distance_by_user.put(&mut wtxn, &followed, &new_distance)?;
-                        
-                        // Update users_by_follow_distance
-                        let mut users = self.users_by_follow_distance
-                            .get(&wtxn, &new_distance)?
-                            .unwrap_or_default();
-                        users.insert(followed);
-                        self.users_by_follow_distance.put(&mut wtxn, &new_distance, &users)?;
-                        
-                        queue.push(followed);
+                        distances.insert(followed, new_distance);
+                        users_by_distance.entry(new_distance).or_default().insert(followed);
+                        queue.push_back(followed);
                     }
                 }
             }
         }
+        drop(rtxn); // finish reading before entering write mode
 
+        // Step 2: Bulk update the DBs in one write transaction
+        let mut wtxn = self.env.write_txn()?;
+        self.follow_distance_by_user.clear(&mut wtxn)?;
+        self.users_by_follow_distance.clear(&mut wtxn)?;
+        
+        for (uid, distance) in distances {
+            self.follow_distance_by_user.put(&mut wtxn, &uid, &distance)?;
+        }
+        for (distance, users) in users_by_distance {
+            self.users_by_follow_distance.put(&mut wtxn, &distance, &users)?;
+        }
+        
         wtxn.commit()?;
         Ok(())
     }
+
 
     pub fn handle_event(&self, event: &Event) -> Result<(), SocialGraphError> {
         debug!("Starting handle_event for {}", event.pubkey);
