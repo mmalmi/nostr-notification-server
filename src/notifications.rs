@@ -2,7 +2,7 @@ use nostr_sdk::nostr::Event;
 use nostr_sdk::{Kind, ToBech32};
 use std::error::Error;
 use std::sync::Arc;
-use log::{debug, error};
+use log::{debug, error, info};
 use crate::config::Settings;
 use crate::db::DbHandler;
 use crate::subscription::Subscription;
@@ -127,18 +127,29 @@ async fn process_author(
     db_handler: &Arc<DbHandler>,
     settings: &Settings,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    debug!("Processing author: {} for event: {}", author, event.id);
+    let has_header = event.tags.iter().any(|tag| tag.as_slice().get(0).map_or(false, |v| *v == "header"));
+    let should_log_info = event.kind == Kind::EncryptedDirectMessage && has_header;
+    
+    if should_log_info {
+        info!("Processing author: {} for event: {}", author, event.id);
+    }
     
     let subscriptions = db_handler.get_subscriptions_by_author(author)?;
     if subscriptions.is_empty() {
-        debug!("No subscriptions found for author: {}", author);
+        if should_log_info {
+            info!("No subscriptions found for author: {}", author);
+        }
         return Ok(());
     }
     
-    debug!("Found {} subscriptions for author: {}", subscriptions.len(), author);
+    if should_log_info {
+        info!("Found {} subscriptions for author: {}", subscriptions.len(), author);
+    }
     
     for (subscription_id, subscription) in subscriptions {
-        debug!("Processing subscription: {:?}", subscription);
+        if should_log_info {
+            info!("Processing subscription: {:?}", subscription);
+        }
         if subscription.matches_event(event) {
             let event_clone = event.clone();
             let settings_clone = settings.clone();
