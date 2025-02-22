@@ -20,6 +20,8 @@ pub struct Settings {
     pub icon_url: String,
     pub notification_base_url: String,
     pub social_graph_root_pubkey: String,
+    #[serde(default = "default_use_social_graph")]
+    pub use_social_graph: bool,
 }
 
 fn default_db_path() -> String {
@@ -28,6 +30,10 @@ fn default_db_path() -> String {
 
 fn default_base_url() -> String {
     "http://localhost:3030".to_string()
+}
+
+fn default_use_social_graph() -> bool {
+    true
 }
 
 impl Settings {
@@ -45,6 +51,7 @@ impl Settings {
         s = s.set_default("icon_url", "https://iris.to/img/android-chrome-192x192.png")?;
         s = s.set_default("notification_base_url", "https://iris.to")?;
         s = s.set_default("social_graph_root_pubkey", "npub1g53mukxnjkcmr94fhryzkqutdz2ukq4ks0gvy5af25rgmwsl4ngq43drvk")?;
+        s = s.set_default("use_social_graph", true)?;
 
         // Parse comma-separated relays from environment
         if let Ok(relays_str) = std::env::var("NNS_RELAYS") {

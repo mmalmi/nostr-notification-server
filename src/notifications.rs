@@ -97,7 +97,7 @@ pub async fn handle_incoming_event(
 
     if event.kind == Kind::Metadata {
         db_handler.profiles.handle_event(event)?;
-    } else if event.kind == Kind::ContactList {
+    } else if event.kind == Kind::ContactList && settings.use_social_graph {
         db_handler.social_graph.handle_event(event)?;
     }
 
