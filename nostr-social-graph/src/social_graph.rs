@@ -144,7 +144,6 @@ impl SocialGraph {
         Ok(())
     }
 
-
     pub fn handle_event(&self, event: &Event) -> Result<(), SocialGraphError> {
         debug!("Starting handle_event for {}", event.pubkey);
         let result = self.private_handle_event(event);
@@ -152,6 +151,7 @@ impl SocialGraph {
         result
     }
 
+    // TODO too high CPU usage
     fn private_handle_event(&self, event: &Event) -> Result<(), SocialGraphError> {
         if event.kind != Kind::ContactList {
             return Ok(());
@@ -209,7 +209,7 @@ impl SocialGraph {
 
         // Single write transaction for all updates
         let needs_recalculation = {
-            let mut wtxn = self.env.write_txn()?;
+            let mut wtxn: heed::RwTxn<'_> = self.env.write_txn()?;
             let mut recalc_needed = false;
             
             self.follow_list_created_at.put(&mut wtxn, &author, &created_at)?;

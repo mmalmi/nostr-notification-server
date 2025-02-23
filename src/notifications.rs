@@ -128,7 +128,7 @@ async fn process_author(
     settings: &Settings,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let has_header = event.tags.iter().any(|tag| tag.as_slice().get(0).map_or(false, |v| *v == "header"));
-    let should_log_info = event.kind == Kind::EncryptedDirectMessage && has_header;
+    let should_log_info = event.kind == Kind::Replaceable(30078) && has_header;
     
     if should_log_info {
         info!("Processing author: {} for event: {}", author, event.id);
