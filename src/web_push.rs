@@ -10,7 +10,7 @@ use web_push::{
 use serde::{Deserialize, Serialize};
 use log::{error, info, debug};
 use crate::config::Settings;
-use crate::notifications::NotificationPayload;
+use crate::notifications::{NotificationPayload, EventPayload};
 use std::error::Error;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -43,10 +43,15 @@ pub async fn send_web_push(
     payload: &NotificationPayload,
     settings: &Settings,
 ) -> Result<bool, Box<dyn Error + Send + Sync>> {
-    info!("Sending web push notification{}", payload.event
-        .as_ref()
-        .map(|event| format!(" for event: {}", event.id))
-        .unwrap_or_default());
+    let event_id = match &payload.event {
+        EventPayload::Full(event) => event.id.to_string(),
+        EventPayload::Details(details) => details.id.clone()
+    };
+    
+    info!("Sending web push notification{}", 
+        if event_id.is_empty() { String::new() } 
+        else { format!(" for event: {}", event_id) }
+    );
     
     let normalized = subscription.normalized();
     
@@ -56,15 +61,7 @@ pub async fn send_web_push(
         &normalized.auth,
     );
 
-    let content = if normalized.endpoint.to_lowercase().contains("apple") {
-        let mut payload_value = serde_json::to_value(payload)?;
-        if let serde_json::Value::Object(ref mut map) = payload_value {
-            map.remove("event");
-        }
-        serde_json::to_vec(&payload_value)?
-    } else {
-        serde_json::to_string(payload)?.into_bytes()
-    };
+    let content = serde_json::to_vec(payload)?;
 
     debug!("Creating VAPID signature builder");
     let sig_builder = VapidSignatureBuilder::from_pem(

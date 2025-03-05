@@ -262,6 +262,14 @@ async fn test_event_endpoint(
     // Verify webhook payload format for kind 1 event
     let webhook_payload = &webhooks[0];
     assert!(webhook_payload.get("event").is_some(), "Payload should contain event");
+    
+    // Verify event details are present
+    let event_details = &webhook_payload["event"];
+    assert!(event_details.get("id").is_some(), "Event should contain id");
+    assert!(event_details.get("pubkey").is_some(), "Event should contain author");
+    assert!(event_details.get("kind").is_some(), "Event should contain kind");
+    assert_eq!(event_details["kind"].as_u64().unwrap(), 1, "Event kind should be 1");
+    
     assert!(webhook_payload.get("title").is_some(), "Payload should contain title");
     assert!(webhook_payload.get("body").is_some(), "Payload should contain body");
     assert!(webhook_payload.get("icon").is_some(), "Payload should contain icon");

@@ -9,10 +9,25 @@ use crate::subscription::Subscription;
 use crate::web_push::send_web_push;
 use std::time::Instant;
 use serde::Serialize;
+use serde_json;
+
+#[derive(Serialize, Debug, Clone)]
+pub struct EventDetails {
+    pub id: String,
+    pub author: String,
+    pub kind: u16,
+}
+
+#[derive(Serialize, Debug, Clone)]
+#[serde(untagged)]
+pub enum EventPayload {
+    Full(Event),
+    Details(EventDetails),
+}
 
 #[derive(Serialize, Debug, Clone)]
 pub struct NotificationPayload {
-    pub event: Option<Event>,
+    pub event: EventPayload,
     pub title: String,
     pub body: String,
     pub icon: String,
@@ -66,8 +81,18 @@ pub async fn create_notification_payload(
         .flatten()
         .unwrap_or_else(|| settings.icon_url.clone());
 
+    // many web push servers have a limit of 4096 bytes for the payload
+    let event_payload = match serde_json::to_vec(event) {
+        Ok(serialized) if serialized.len() <= 4096 => EventPayload::Full(event.clone()),
+        _ => EventPayload::Details(EventDetails {
+            id: event.id.to_hex(),
+            author: event.pubkey.to_hex(),
+            kind: event.kind.as_u16(),
+        }),
+    };
+
     NotificationPayload {
-        event: Some(event.clone()),
+        event: event_payload,
         title,
         body,
         icon,
