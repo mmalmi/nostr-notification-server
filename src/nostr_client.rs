@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use log::{error, info, debug, warn};
-use nostr_sdk::{Client, Filter, Keys, RelayPoolNotification, Timestamp, Event};
+use nostr_sdk::{Client, Filter, Keys, RelayPoolNotification, Timestamp, Event, Kind};
 use tokio::time::timeout;
 use clru::CLruCache;
 use std::num::NonZeroUsize;
@@ -37,10 +37,14 @@ pub async fn run_nostr_client(
     client.connect().await;
     info!("Connected to relays");
 
-    let everything_filter = vec![Filter::new().since(Timestamp::now())];
+    let two_days_ago = Timestamp::now() - 172800; // 2 days = 172800 seconds
+    let filters = vec![
+        Filter::new().since(Timestamp::now()), // everything from now
+        Filter::new().kind(Kind::Custom(1059)).since(two_days_ago), // gift wraps - kind 1059 from past 2 days
+    ];
 
     // Subscribe to events
-    client.subscribe(everything_filter, None).await?;
+    client.subscribe(filters, None).await?;
 
     // Get notification receiver
     let mut notifications = client.notifications();
@@ -55,13 +59,12 @@ pub async fn run_nostr_client(
         }
 
         if let RelayPoolNotification::Event { event, .. } = notification {
-            // Check if event was already seen
             let event_id = event.id.to_string();
+            
             if seen_events.contains(&event_id) {
                 continue;
             }
 
-            // Store the event ID (using a dummy value since we only care about keys)
             seen_events.put(event_id, ());
 
             if let Err(e) = handle_event(*event, db_handler.clone(), settings.clone()).await {

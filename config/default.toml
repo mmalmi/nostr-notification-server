@@ -5,7 +5,9 @@ http_port = 3030
 base_url = "http://0.0.0.0:3030"
 relays = [
     "wss://relay.damus.io",
-    "wss://nos.lol",
+    "wss://strfry.iris.to",
+    "wss://relay.nostr.band",
+    "wss://relay.snort.social",
 ]
 db_map_size = 1073741824  # 1GB in bytes (1024 * 1024 * 1024)
 icon_url = "https://iris.to/img/android-chrome-192x192.png"
