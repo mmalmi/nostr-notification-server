@@ -143,14 +143,29 @@ fn create_title(event_type: &str, author_name: &str, kind: Kind) -> String {
 fn create_body(event: &Event) -> String {
     const MAX_BODY_LENGTH: usize = 140;
 
-    if event.kind.as_u16() == 1 {
-        if event.content.chars().count() > MAX_BODY_LENGTH {
-            format!("{}...", event.content.chars().take(MAX_BODY_LENGTH).collect::<String>())
-        } else {
-            event.content.clone()
-        }
-    } else {
-        String::new()
+    match event.kind {
+        Kind::TextNote => {
+            if event.content.chars().count() > MAX_BODY_LENGTH {
+                format!("{}...", event.content.chars().take(MAX_BODY_LENGTH).collect::<String>())
+            } else {
+                event.content.clone()
+            }
+        },
+        Kind::ZapReceipt => {
+            // Extract zap comment from the description tag
+            event.tags.iter()
+                .find_map(|tag| {
+                    if let Some(TagStandard::Description(desc)) = tag.as_standardized() {
+                        Event::from_json(desc)
+                            .ok()
+                            .map(|zap_request| zap_request.content)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_default()
+        },
+        _ => String::new()
     }
 }
 
