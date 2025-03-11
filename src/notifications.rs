@@ -100,22 +100,33 @@ fn get_event_type(event: &Event, db_handler: &Arc<DbHandler>, pubkey: &str) -> S
 }
 
 fn create_zap_message(event: &Event, db_handler: &Arc<DbHandler>, pubkey: &str) -> String {
-    let amount = event.tags.iter()
-        .find_map(|tag| {
-            if let Some(TagStandard::Amount { millisats, .. }) = tag.as_standardized() {
-                Some(millisats / 1000)
-            } else {
-                None
-            }
-        })
-        .unwrap_or(0);
-
     let sender_name = db_handler.profiles.get_name(pubkey)
         .ok()
         .flatten()
         .unwrap_or_else(|| "Someone".to_string());
 
-    format!("{} zapped {} sats", sender_name, amount)
+    let amount = event.tags.iter()
+        .find_map(|tag| {
+            if let Some(TagStandard::Amount { millisats, .. }) = tag.as_standardized() {
+                Some(millisats)
+            } else {
+                None
+            }
+        });
+
+    match amount {
+        Some(millisats) => {
+            if *millisats < 1000 {
+                format!("{} zapped {:.3} sats", sender_name, *millisats as f64 / 1000.0)
+            } else {
+                format!("{} zapped {} sats", sender_name, millisats / 1000)
+            }
+        }
+        None => {
+            debug!("Failed to extract zap amount from event: {}", event.id);
+            format!("{} sent a zap", sender_name)
+        }
+    }
 }
 
 fn create_reaction_message(content: &str) -> String {
