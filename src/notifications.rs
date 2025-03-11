@@ -12,6 +12,8 @@ use std::time::Instant;
 use serde::Serialize;
 use serde_json;
 
+const MAX_REACTION_LENGTH: usize = 20;
+
 #[derive(Serialize, Debug, Clone)]
 pub struct EventDetails {
     pub id: String,
@@ -46,11 +48,30 @@ pub async fn create_notification_payload(
     settings: &Settings,
     db_handler: &Arc<DbHandler>,
 ) -> NotificationPayload {
-    const MAX_BODY_LENGTH: usize = 140;
-    const MAX_REACTION_LENGTH: usize = 20;
+    let pubkey = extract_pubkey(event);
+    let event_type = get_event_type(event, db_handler, &pubkey);
+    let author_name = db_handler.profiles.get_name(&pubkey)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "Unknown".to_string());
     
-    // Extract zap sender's pubkey once if it's a ZapReceipt
-    let pubkey = if event.kind == Kind::ZapReceipt {
+    let title = create_title(&event_type, &author_name, event.kind);
+    let body = create_body(event);
+    let icon = get_author_icon(&pubkey, db_handler, settings);
+    let event_payload = create_event_payload(event);
+    let note_id = event.id.to_bech32().expect("Failed to convert event id to bech32");
+
+    NotificationPayload {
+        event: event_payload,
+        title,
+        body,
+        icon,
+        url: format!("{}/{}", settings.notification_base_url, note_id),
+    }
+}
+
+fn extract_pubkey(event: &Event) -> String {
+    if event.kind == Kind::ZapReceipt {
         event.tags.iter()
             .find_map(|tag| {
                 if let Some(TagStandard::Description(desc)) = tag.as_standardized() {
@@ -64,58 +85,65 @@ pub async fn create_notification_payload(
             .unwrap_or_else(|| event.pubkey.to_hex())
     } else {
         event.pubkey.to_hex()
-    };
+    }
+}
 
-    let event_type = match event.kind {
+fn get_event_type(event: &Event, db_handler: &Arc<DbHandler>, pubkey: &str) -> String {
+    match event.kind {
         Kind::TextNote => "Mention".to_string(),
         Kind::EncryptedDirectMessage | Kind::GiftWrap => "DM".to_string(),
         Kind::Repost => "Repost".to_string(),
-        Kind::ZapReceipt => {
-            let amount = event.tags.iter()
-                .find_map(|tag| {
-                    if let Some(TagStandard::Amount { millisats, .. }) = tag.as_standardized() {
-                        Some(millisats / 1000)
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or(0);
-
-            let sender_name = db_handler.profiles.get_name(&pubkey)
-                .ok()
-                .flatten()
-                .unwrap_or_else(|| "Unknown".to_string());
-
-            format!("{} zapped {} sats", sender_name, amount)
-        },
-        Kind::Reaction => {
-            let reaction_content = if event.content.chars().count() > MAX_REACTION_LENGTH {
-                format!("{}...", event.content.chars().take(MAX_REACTION_LENGTH).collect::<String>())
-            } else {
-                event.content.clone()
-            };
-            if reaction_content == "+" {
-                "liked your post".to_string()
-            } else {
-                format!("reacted with \"{}\"", reaction_content)
-            }
-        },
+        Kind::ZapReceipt => create_zap_message(event, db_handler, pubkey),
+        Kind::Reaction => create_reaction_message(&event.content),
         _ => "Notification".to_string(),
-    };
+    }
+}
 
-    // Use the already extracted pubkey for author name
-    let author_name = db_handler.profiles.get_name(&pubkey)
+fn create_zap_message(event: &Event, db_handler: &Arc<DbHandler>, pubkey: &str) -> String {
+    let amount = event.tags.iter()
+        .find_map(|tag| {
+            if let Some(TagStandard::Amount { millisats, .. }) = tag.as_standardized() {
+                Some(millisats / 1000)
+            } else {
+                None
+            }
+        })
+        .unwrap_or(0);
+
+    let sender_name = db_handler.profiles.get_name(pubkey)
         .ok()
         .flatten()
         .unwrap_or_else(|| "Unknown".to_string());
-    
-    let title = if event.kind == Kind::Reaction {
+
+    format!("{} zapped {} sats", sender_name, amount)
+}
+
+fn create_reaction_message(content: &str) -> String {
+    let reaction_content = if content.chars().count() > MAX_REACTION_LENGTH {
+        format!("{}...", content.chars().take(MAX_REACTION_LENGTH).collect::<String>())
+    } else {
+        content.to_string()
+    };
+
+    if reaction_content == "+" {
+        "liked your post".to_string()
+    } else {
+        format!("reacted with \"{}\"", reaction_content)
+    }
+}
+
+fn create_title(event_type: &str, author_name: &str, kind: Kind) -> String {
+    if kind == Kind::Reaction {
         format!("{} {}", author_name, event_type)
     } else {
         format!("New {} from {}", event_type, author_name)
-    };
+    }
+}
 
-    let body = if event.kind.as_u16() == 1 {
+fn create_body(event: &Event) -> String {
+    const MAX_BODY_LENGTH: usize = 140;
+
+    if event.kind.as_u16() == 1 {
         if event.content.chars().count() > MAX_BODY_LENGTH {
             format!("{}...", event.content.chars().take(MAX_BODY_LENGTH).collect::<String>())
         } else {
@@ -123,32 +151,24 @@ pub async fn create_notification_payload(
         }
     } else {
         String::new()
-    };
+    }
+}
 
-    let note_id = event.id.to_bech32().expect("Failed to convert event id to bech32");
-
-    // Use author's profile picture as icon if available, otherwise fall back to default
-    let icon = db_handler.profiles.get_picture(&pubkey)
+fn get_author_icon(pubkey: &str, db_handler: &Arc<DbHandler>, settings: &Settings) -> String {
+    db_handler.profiles.get_picture(pubkey)
         .ok()
         .flatten()
-        .unwrap_or_else(|| settings.icon_url.clone());
+        .unwrap_or_else(|| settings.icon_url.clone())
+}
 
-    // many web push servers have a limit of 4096 bytes for the payload
-    let event_payload = match serde_json::to_vec(event) {
+fn create_event_payload(event: &Event) -> EventPayload {
+    match serde_json::to_vec(event) {
         Ok(serialized) if serialized.len() <= 4096 => EventPayload::Full(event.clone()),
         _ => EventPayload::Details(EventDetails {
             id: event.id.to_hex(),
             author: event.pubkey.to_hex(),
             kind: event.kind.as_u16(),
         }),
-    };
-
-    NotificationPayload {
-        event: event_payload,
-        title,
-        body,
-        icon,
-        url: format!("{}/{}", settings.notification_base_url, note_id),
     }
 }
 
