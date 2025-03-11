@@ -39,7 +39,7 @@ impl SocialGraph {
         
         let ids = UniqueIds::new(&unique_ids_path, serialized.as_ref().map(|s| s.unique_ids.clone()))
             .map_err(|e| SocialGraphError::Database(e.to_string()))?;
-        let root_id = ids.get_or_create_id(root);
+        let root_id = ids.get_or_create_id(root)?;
         
         let (
             follow_distance_by_user,
@@ -93,7 +93,7 @@ impl SocialGraph {
     }
 
     pub fn set_root(&mut self, root: &str) -> Result<(), SocialGraphError> {
-        let root_id = self.ids.get_or_create_id(root);
+        let root_id = self.ids.get_or_create_id(root)?;
         self.root = root_id;
         self.recalculate_follow_distances()?;
         Ok(())
@@ -157,7 +157,7 @@ impl SocialGraph {
             return Ok(());
         }
         
-        let author = self.ids.get_or_create_id(&event.pubkey.to_hex());
+        let author = self.ids.get_or_create_id(&event.pubkey.to_hex())?;
         let created_at = event.created_at.as_u64();
         let current_time = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -184,7 +184,7 @@ impl SocialGraph {
                 if letter_tag.as_char() == 'p' {
                     if let Some(pubkey) = tag.content() {
                         if pubkey.len() == 64 && pubkey.chars().all(|c| c.is_ascii_hexdigit()) {
-                            let followed_user = self.ids.get_or_create_id(pubkey);
+                            let followed_user = self.ids.get_or_create_id(pubkey)?;
                             if followed_user != author {
                                 followed_in_event.insert(followed_user);
                             }
@@ -209,7 +209,7 @@ impl SocialGraph {
 
         // Single write transaction for all updates
         let needs_recalculation = {
-            let mut wtxn: heed::RwTxn<'_> = self.env.write_txn()?;
+            let mut wtxn = self.env.write_txn()?;
             let mut recalc_needed = false;
             
             self.follow_list_created_at.put(&mut wtxn, &author, &created_at)?;
@@ -307,8 +307,8 @@ impl SocialGraph {
     }
 
     pub fn add_follower(&self, follower: &str, followed_user: &str) -> Result<(), SocialGraphError> {
-        let follower_id = self.ids.get_or_create_id(follower);
-        let followed_user_id = self.ids.get_or_create_id(followed_user);
+        let follower_id = self.ids.get_or_create_id(follower)?;
+        let followed_user_id = self.ids.get_or_create_id(followed_user)?;
         
         // Check if already following
         {

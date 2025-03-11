@@ -1,7 +1,7 @@
 use heed::types::*;
 use heed::{Database, Env};
 use heed::byteorder::BigEndian;
-use std::sync::Mutex;
+use std::sync::RwLock;
 use std::path::Path;
 
 pub type UID = u64;
@@ -11,7 +11,24 @@ pub struct UniqueIds {
     env: Env,
     str_to_unique_id: Database<Str, U64<BigEndian>>,
     unique_id_to_str: Database<U64<BigEndian>, Str>,
-    current_unique_id: Mutex<UID>,
+    current_unique_id: RwLock<UID>,
+}
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+pub enum UniqueIdError {
+    DatabaseError(String),
+    InvalidId(UID),
+}
+
+impl std::error::Error for UniqueIdError {}
+
+impl std::fmt::Display for UniqueIdError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DatabaseError(e) => write!(f, "Database error: {}", e),
+            Self::InvalidId(id) => write!(f, "Invalid id: {}", id),
+        }
+    }
 }
 
 impl UniqueIds {
@@ -34,7 +51,7 @@ impl UniqueIds {
             env,
             str_to_unique_id,
             unique_id_to_str,
-            current_unique_id: Mutex::new(0),
+            current_unique_id: RwLock::new(0),
         };
 
         if let Some(data) = serialized {
@@ -46,7 +63,7 @@ impl UniqueIds {
                 max_id = max_id.max(id + 1);
             }
             wtxn.commit()?;
-            *instance.current_unique_id.lock().unwrap() = max_id;
+            *instance.current_unique_id.write().unwrap() = max_id;
         }
 
         Ok(instance)
@@ -57,24 +74,33 @@ impl UniqueIds {
         self.str_to_unique_id.get(&rtxn, s).unwrap()
     }
 
-    pub fn get_or_create_id(&self, s: &str) -> UID {
+    pub fn get_or_create_id(&self, s: &str) -> Result<UID, UniqueIdError> {
         if let Some(id) = self.id(s) {
-            return id;
+            return Ok(id);
         }
 
         let new_id = {
-            let mut current_id = self.current_unique_id.lock().unwrap();
+            let mut current_id = self.current_unique_id.write().unwrap();
             let id = *current_id;
             *current_id += 1;
             id
         };
 
-        let mut wtxn = self.env.write_txn().unwrap();
-        self.str_to_unique_id.put(&mut wtxn, s, &new_id).unwrap();
-        self.unique_id_to_str.put(&mut wtxn, &new_id, s).unwrap();
-        wtxn.commit().unwrap();
+        let mut wtxn = self.env.write_txn().map_err(|e| UniqueIdError::DatabaseError(e.to_string()))?;
+        
+        if let Some(existing_id) = self.str_to_unique_id.get(&wtxn, s)
+            .map_err(|e| UniqueIdError::DatabaseError(e.to_string()))? {
+            wtxn.abort();
+            return Ok(existing_id);
+        }
 
-        new_id
+        self.str_to_unique_id.put(&mut wtxn, s, &new_id)
+            .map_err(|e| UniqueIdError::DatabaseError(e.to_string()))?;
+        self.unique_id_to_str.put(&mut wtxn, &new_id, s)
+            .map_err(|e| UniqueIdError::DatabaseError(e.to_string()))?;
+        wtxn.commit().map_err(|e| UniqueIdError::DatabaseError(e.to_string()))?;
+
+        Ok(new_id)
     }
 
     pub fn str(&self, id: UID) -> Result<String, Box<dyn std::error::Error>> {
@@ -99,5 +125,40 @@ impl UniqueIds {
         }
         
         Ok(result)
+    }
+
+    pub fn batch_insert(&self, strings: &[String]) -> Result<Vec<UID>, UniqueIdError> {
+        let mut wtxn = self.env.write_txn().map_err(|e| UniqueIdError::DatabaseError(e.to_string()))?;
+        let mut results = Vec::with_capacity(strings.len());
+        
+        for s in strings {
+            if let Some(id) = self.str_to_unique_id.get(&wtxn, s)
+                .map_err(|e| UniqueIdError::DatabaseError(e.to_string()))? {
+                results.push(id);
+                continue;
+            }
+
+            let new_id = {
+                let mut current_id = self.current_unique_id.write().unwrap();
+                let id = *current_id;
+                *current_id += 1;
+                id
+            };
+
+            self.str_to_unique_id.put(&mut wtxn, s, &new_id)
+                .map_err(|e| UniqueIdError::DatabaseError(e.to_string()))?;
+            self.unique_id_to_str.put(&mut wtxn, &new_id, s)
+                .map_err(|e| UniqueIdError::DatabaseError(e.to_string()))?;
+            results.push(new_id);
+        }
+
+        wtxn.commit().map_err(|e| UniqueIdError::DatabaseError(e.to_string()))?;
+        Ok(results)
+    }
+}
+
+impl Drop for UniqueIds {
+    fn drop(&mut self) {
+        self.env.force_sync().ok();
     }
 }

@@ -1,6 +1,7 @@
 use std::error::Error;
 use std::fmt;
 use std::num::ParseIntError;
+use crate::unique_ids::UniqueIdError;
 
 #[derive(Debug)]
 pub enum SocialGraphError {
@@ -50,5 +51,11 @@ impl From<Box<dyn Error>> for SocialGraphError {
 impl From<Box<dyn Error + Send + Sync>> for SocialGraphError {
     fn from(err: Box<dyn Error + Send + Sync>) -> Self {
         Self::InvalidData(err.to_string())
+    }
+}
+
+impl From<UniqueIdError> for SocialGraphError {
+    fn from(error: UniqueIdError) -> Self {
+        SocialGraphError::Database(error.to_string())
     }
 } 
