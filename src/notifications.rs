@@ -53,7 +53,7 @@ pub async fn create_notification_payload(
     let author_name = db_handler.profiles.get_name(&pubkey)
         .ok()
         .flatten()
-        .unwrap_or_else(|| "Unknown".to_string());
+        .unwrap_or_else(|| "Someone".to_string());
     
     let title = create_title(&event_type, &author_name, event.kind);
     let body = create_body(event);
@@ -113,7 +113,7 @@ fn create_zap_message(event: &Event, db_handler: &Arc<DbHandler>, pubkey: &str) 
     let sender_name = db_handler.profiles.get_name(pubkey)
         .ok()
         .flatten()
-        .unwrap_or_else(|| "Unknown".to_string());
+        .unwrap_or_else(|| "Someone".to_string());
 
     format!("{} zapped {} sats", sender_name, amount)
 }
@@ -133,7 +133,7 @@ fn create_reaction_message(content: &str) -> String {
 }
 
 fn create_title(event_type: &str, author_name: &str, kind: Kind) -> String {
-    if kind == Kind::Reaction {
+    if kind == Kind::Reaction || kind == Kind::ZapReceipt {
         format!("{} {}", author_name, event_type)
     } else {
         format!("New {} from {}", event_type, author_name)
