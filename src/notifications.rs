@@ -46,13 +46,21 @@ pub async fn create_notification_payload(
     db_handler: &Arc<DbHandler>,
 ) -> NotificationPayload {
     const MAX_BODY_LENGTH: usize = 140;
+    const MAX_REACTION_LENGTH: usize = 20;
     
     let event_type = match event.kind {
-        Kind::TextNote => "Mention",
-        Kind::EncryptedDirectMessage | Kind::GiftWrap => "DM",
-        Kind::Repost => "Repost",
-        Kind::Reaction => "Reaction",
-        _ => "Notification",
+        Kind::TextNote => "Mention".to_string(),
+        Kind::EncryptedDirectMessage | Kind::GiftWrap => "DM".to_string(),
+        Kind::Repost => "Repost".to_string(),
+        Kind::Reaction => {
+            let reaction_content = if event.content.chars().count() > MAX_REACTION_LENGTH {
+                format!("{}...", event.content.chars().take(MAX_REACTION_LENGTH).collect::<String>())
+            } else {
+                event.content.clone()
+            };
+            format!("reacted with \"{}\"", reaction_content)
+        },
+        _ => "Notification".to_string(),
     };
 
     let pubkey = event.pubkey.to_hex();
@@ -61,7 +69,11 @@ pub async fn create_notification_payload(
         .flatten()
         .unwrap_or_else(|| "Unknown".to_string());
     
-    let title = format!("New {} from {}", event_type, author_name);
+    let title = if event.kind == Kind::Reaction {
+        format!("{} {}", author_name, event_type)
+    } else {
+        format!("New {} from {}", event_type, author_name)
+    };
 
     let body = if event.kind.as_u16() == 1 {
         if event.content.chars().count() > MAX_BODY_LENGTH {
