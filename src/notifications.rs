@@ -139,7 +139,7 @@ fn create_reaction_message(content: &str) -> String {
     if reaction_content == "+" {
         "liked your post".to_string()
     } else {
-        format!("reacted with \"{}\"", reaction_content)
+        format!("reacted with {}", reaction_content)
     }
 }
 
