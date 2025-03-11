@@ -125,4 +125,35 @@ impl ProfileHandler {
         let rtxn = self.env.read_txn()?;
         Ok(self.pictures.get(&rtxn, pubkey)?.map(|s| s.to_string()))
     }
+
+    pub fn import_from_json(&self, json_str: &str) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+        let profiles: Vec<Vec<String>> = serde_json::from_str(json_str)?;
+        let mut wtxn = self.env.write_txn()?;
+        let mut imported = 0;
+
+        for profile in profiles {
+            if let Some(pubkey) = profile.get(0) {
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)?
+                    .as_secs();
+
+                self.timestamps.put(&mut wtxn, pubkey, &timestamp)?;
+
+                if let Some(name) = profile.get(1) {
+                    self.names.put(&mut wtxn, pubkey, name)?;
+                }
+
+                if let Some(picture) = profile.get(3) {
+                    if Self::is_valid_image_url(picture) {
+                        self.pictures.put(&mut wtxn, pubkey, picture)?;
+                    }
+                }
+                
+                imported += 1;
+            }
+        }
+
+        wtxn.commit()?;
+        Ok(imported)
+    }
 }

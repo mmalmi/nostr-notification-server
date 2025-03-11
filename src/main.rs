@@ -52,6 +52,12 @@ enum Commands {
         #[arg(long)]
         missing_only: bool,
     },
+    /// Import profiles from JSON file
+    ImportProfiles {
+        /// Path to JSON file containing profiles
+        #[arg(short, long)]
+        file: String,
+    },
 }
 
 #[tokio::main]
@@ -68,6 +74,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Commands::Serve => run_server().await,
         Commands::Crawl => run_crawler().await,
         Commands::CrawlProfiles { missing_only } => run_profile_crawler(missing_only).await,
+        Commands::ImportProfiles { file } => run_profile_import(&file).await,
     }
 }
 
@@ -261,6 +268,31 @@ async fn run_profile_crawler(missing_only: bool) -> Result<(), Box<dyn std::erro
     crawler.crawl_profiles(missing_only).await?;
 
     info!("Profile crawler shutting down");
+    Ok(())
+}
+
+async fn run_profile_import(file_path: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let settings = Arc::new(Settings::new()?);
+    println!("Loading profiles from {}", file_path);
+
+    let env = unsafe {
+        heed::EnvOpenOptions::new()
+            .map_size(settings.db_map_size)
+            .max_dbs(20)
+            .open(&settings.db_path)?
+    };
+
+    let profile_handler = Arc::new(ProfileHandler::new(env.clone())?);
+    let file_content = fs::read_to_string(file_path)?;
+    
+    let before_count = profile_handler.get_profile_count()?;
+    let imported = profile_handler.import_from_json(&file_content)?;
+    let after_count = profile_handler.get_profile_count()?;
+
+    println!("\nImport complete:");
+    println!("  Profiles before: {}", before_count);
+    println!("  Profiles imported: {}", imported);
+    println!("  Total profiles now: {}", after_count);
     Ok(())
 }
 
