@@ -18,6 +18,9 @@ pub async fn run_nostr_client(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!("Starting run_nostr_client");
 
+    // Add startup timestamp
+    let startup_time = std::time::SystemTime::now();
+    
     // Generate new random keys
     let my_keys = Keys::generate();
     info!("Generated new keys");
@@ -63,6 +66,16 @@ pub async fn run_nostr_client(
             
             if seen_events.contains(&event_id) {
                 continue;
+            }
+
+            // Skip gift wrap events in the first minute
+            if event.kind == Kind::Custom(1059) {
+                if let Ok(elapsed) = startup_time.elapsed() {
+                    if elapsed < Duration::from_secs(60) {
+                        debug!("Skipping gift wrap event during startup period");
+                        continue;
+                    }
+                }
             }
 
             seen_events.put(event_id, ());
