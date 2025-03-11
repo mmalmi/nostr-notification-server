@@ -1,4 +1,5 @@
-use nostr_sdk::nostr::Event;
+use nostr_sdk::prelude::*;
+use nostr_sdk::nostr::{Event, TagStandard};
 use nostr_sdk::{Kind, ToBech32};
 use std::error::Error;
 use std::sync::Arc;
@@ -48,10 +49,45 @@ pub async fn create_notification_payload(
     const MAX_BODY_LENGTH: usize = 140;
     const MAX_REACTION_LENGTH: usize = 20;
     
+    // Extract zap sender's pubkey once if it's a ZapReceipt
+    let pubkey = if event.kind == Kind::ZapReceipt {
+        event.tags.iter()
+            .find_map(|tag| {
+                if let Some(TagStandard::Description(desc)) = tag.as_standardized() {
+                    Event::from_json(desc)
+                        .ok()
+                        .map(|zap_request| zap_request.pubkey.to_hex())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| event.pubkey.to_hex())
+    } else {
+        event.pubkey.to_hex()
+    };
+
     let event_type = match event.kind {
         Kind::TextNote => "Mention".to_string(),
         Kind::EncryptedDirectMessage | Kind::GiftWrap => "DM".to_string(),
         Kind::Repost => "Repost".to_string(),
+        Kind::ZapReceipt => {
+            let amount = event.tags.iter()
+                .find_map(|tag| {
+                    if let Some(TagStandard::Amount { millisats, .. }) = tag.as_standardized() {
+                        Some(millisats / 1000)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(0);
+
+            let sender_name = db_handler.profiles.get_name(&pubkey)
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| "Unknown".to_string());
+
+            format!("{} zapped {} sats", sender_name, amount)
+        },
         Kind::Reaction => {
             let reaction_content = if event.content.chars().count() > MAX_REACTION_LENGTH {
                 format!("{}...", event.content.chars().take(MAX_REACTION_LENGTH).collect::<String>())
@@ -63,7 +99,7 @@ pub async fn create_notification_payload(
         _ => "Notification".to_string(),
     };
 
-    let pubkey = event.pubkey.to_hex();
+    // Use the already extracted pubkey for author name
     let author_name = db_handler.profiles.get_name(&pubkey)
         .ok()
         .flatten()
