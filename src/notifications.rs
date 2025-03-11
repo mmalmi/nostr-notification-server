@@ -94,7 +94,11 @@ pub async fn create_notification_payload(
             } else {
                 event.content.clone()
             };
-            format!("reacted with \"{}\"", reaction_content)
+            if reaction_content == "+" {
+                "liked your post".to_string()
+            } else {
+                format!("reacted with \"{}\"", reaction_content)
+            }
         },
         _ => "Notification".to_string(),
     };
