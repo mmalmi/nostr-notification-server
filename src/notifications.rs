@@ -139,7 +139,7 @@ fn create_reaction_message(content: &str) -> String {
     if reaction_content == "+" {
         "liked your post".to_string()
     } else {
-        format!("reacted with {}", reaction_content)
+        format!("reacted {}", reaction_content)
     }
 }
 
@@ -147,7 +147,7 @@ fn create_title(event_type: &str, author_name: &str, kind: Kind) -> String {
     if kind == Kind::Reaction || kind == Kind::ZapReceipt {
         format!("{} {}", author_name, event_type)
     } else {
-        format!("New {} from {}", event_type, author_name)
+        format!("{} by {}", event_type, author_name)
     }
 }
 
