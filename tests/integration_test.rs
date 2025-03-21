@@ -275,7 +275,7 @@ async fn test_event_endpoint(
     assert!(webhook_payload.get("icon").is_some(), "Payload should contain icon");
     assert!(webhook_payload.get("url").is_some(), "Payload should contain url");
     
-    assert_eq!(webhook_payload["title"].as_str().unwrap(), "New Mention from Someone");
+    assert_eq!(webhook_payload["title"].as_str().unwrap(), "Mention by Someone");
     assert_eq!(webhook_payload["body"].as_str().unwrap(), "Test content");
     assert!(webhook_payload["url"].as_str().unwrap().contains("https://iris.to/note1"));
 }
@@ -471,7 +471,7 @@ async fn test_encrypted_dm_notifications(
 
     // Verify DM webhook payload format
     let dm_payload = &webhooks[0];
-    assert_eq!(dm_payload["title"].as_str().unwrap(), "New DM from Someone");
+    assert_eq!(dm_payload["title"].as_str().unwrap(), "DM by Someone");
     assert_eq!(dm_payload["body"].as_str().unwrap(), "");  // DM content should be empty in notification
     assert!(dm_payload["url"].as_str().unwrap().contains("https://iris.to/note1"));
 }

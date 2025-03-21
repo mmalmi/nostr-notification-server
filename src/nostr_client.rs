@@ -68,12 +68,15 @@ pub async fn run_nostr_client(
                 continue;
             }
 
-            // Skip gift wrap events in the first minute
+            // Skip gift wrap events in the first minutes
             if event.kind == Kind::Custom(1059) {
                 if let Ok(elapsed) = startup_time.elapsed() {
-                    if elapsed < Duration::from_secs(60) {
-                        debug!("Skipping gift wrap event during startup period");
-                        continue;
+                    if elapsed < Duration::from_secs(60 * 2) {
+                        // Check if event timestamp is before startup time
+                        if event.created_at.as_u64() <= startup_time.elapsed().unwrap().as_secs() {
+                            debug!("Skipping gift wrap event during startup period");
+                            continue;
+                        }
                     }
                 }
             }
