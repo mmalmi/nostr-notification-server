@@ -50,7 +50,7 @@ pub async fn verify_nostr_auth(
         
         // Verify URL and method tags
         let url_tag = event.tags.iter().find(|tag| {
-            matches!(Tag::parse(&["url", url]), Ok(t) if t == **tag)
+            matches!(Tag::parse(&["u", url]), Ok(t) if t == **tag)
         });
 
         let method_tag = event.tags.iter().find(|tag| {

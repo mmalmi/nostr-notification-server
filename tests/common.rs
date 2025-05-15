@@ -162,7 +162,7 @@ async fn create_auth_header(url: &str, method: &str) -> String {
 
 async fn create_auth_header_with_keys(url: &str, method: &str, keys: &Keys) -> String {
     let tags = vec![
-        Tag::parse(&["url", url]).expect("Failed to create url tag"),
+        Tag::parse(&["u", url]).expect("Failed to create url tag"),
         Tag::parse(&["method", method]).expect("Failed to create method tag"),
     ];
 
