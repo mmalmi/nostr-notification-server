@@ -56,7 +56,7 @@ pub async fn start_server() -> tokio::process::Child {
         .expect("Failed to start application");
 
     // Give the server some time to start
-    sleep(Duration::from_secs(1)).await;
+    sleep(Duration::from_secs(2)).await;
     child
 }
 
