@@ -5,7 +5,7 @@ http_port = 3030
 base_url = "http://0.0.0.0:3030"
 relays = [
     "wss://relay.damus.io",
-    "wss://strfry.iris.to",
+    "wss://temp.iris.to",
     "wss://relay.nostr.band",
     "wss://relay.snort.social",
 ]
