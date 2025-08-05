@@ -16,6 +16,7 @@ pub struct DbHandler {
     subscriptions_by_author_and_id: Database<Str, Str>,
     pub social_graph: SocialGraph,
     pub profiles: ProfileHandler,
+    metadata: Database<Str, Bytes>,
 }
 
 impl DbHandler {
@@ -29,14 +30,15 @@ impl DbHandler {
                 .open(&settings.db_path)?
         };
 
-        let (subscriptions, subscriptions_by_p_tag_and_id, subscriptions_by_pubkey_and_id, subscriptions_by_author_and_id) = {
+        let (subscriptions, subscriptions_by_p_tag_and_id, subscriptions_by_pubkey_and_id, subscriptions_by_author_and_id, metadata) = {
             let mut wtxn = environment.write_txn()?;
             let subscriptions = environment.create_database(&mut wtxn, Some("subscriptions"))?;
             let subscriptions_by_p_tag_and_id = environment.create_database(&mut wtxn, Some("subscriptions_by_p_tag_and_id"))?;
             let subscriptions_by_pubkey_and_id = environment.create_database(&mut wtxn, Some("subscriptions_by_pubkey_and_id"))?;
             let subscriptions_by_author_and_id = environment.create_database(&mut wtxn, Some("subscriptions_by_author_and_id"))?;
+            let metadata = environment.create_database(&mut wtxn, Some("metadata"))?;
             wtxn.commit()?;
-            (subscriptions, subscriptions_by_p_tag_and_id, subscriptions_by_pubkey_and_id, subscriptions_by_author_and_id)
+            (subscriptions, subscriptions_by_p_tag_and_id, subscriptions_by_pubkey_and_id, subscriptions_by_author_and_id, metadata)
         };
 
         let root_pubkey = &settings.social_graph_root_pubkey;
@@ -70,6 +72,7 @@ impl DbHandler {
             subscriptions_by_author_and_id,
             social_graph,
             profiles,
+            metadata,
         })
     }
 
@@ -245,6 +248,29 @@ impl DbHandler {
 
         debug!("Retrieved subscriptions for author {}: {:?}", author, subscriptions.len());
         Ok(subscriptions)
+    }
+
+    pub fn save_last_event_time(&self, timestamp: u64) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut wtxn = self.env.write_txn()?;
+        let timestamp_bytes = timestamp.to_be_bytes();
+        self.metadata.put(&mut wtxn, "last_event_time", &timestamp_bytes)?;
+        wtxn.commit()?;
+        Ok(())
+    }
+
+    pub fn get_last_event_time(&self) -> Result<Option<u64>, Box<dyn std::error::Error + Send + Sync>> {
+        let rtxn = self.env.read_txn()?;
+        let result = self.metadata.get(&rtxn, "last_event_time")?
+            .and_then(|bytes| {
+                if bytes.len() == 8 {
+                    let mut array = [0u8; 8];
+                    array.copy_from_slice(bytes);
+                    Some(u64::from_be_bytes(array))
+                } else {
+                    None
+                }
+            });
+        Ok(result)
     }
 }
 

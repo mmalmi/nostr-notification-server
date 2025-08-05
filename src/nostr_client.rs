@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use log::{error, info, debug, warn};
 use nostr_sdk::{Client, Filter, Keys, RelayPoolNotification, Timestamp, Event, Kind};
 use tokio::time::timeout;
@@ -21,6 +21,20 @@ pub async fn run_nostr_client(
     // Add startup timestamp
     let startup_time = std::time::SystemTime::now();
     
+    // Load last event time from database
+    let last_event_time = db_handler.get_last_event_time()
+        .unwrap_or_else(|e| {
+            error!("Failed to load last event time: {}", e);
+            None
+        });
+    
+    if let Some(timestamp) = last_event_time {
+        info!("Loaded last event time: {} ({})", timestamp, 
+            Timestamp::from(timestamp));
+    } else {
+        info!("No previous last event time found, starting fresh");
+    }
+    
     // Generate new random keys
     let my_keys = Keys::generate();
     info!("Generated new keys");
@@ -40,11 +54,21 @@ pub async fn run_nostr_client(
     client.connect().await;
     info!("Connected to relays");
 
+    // Use last event time if available, otherwise start from now for regular events
+    let since_timestamp = if let Some(last_time) = last_event_time {
+        // Add 1 second to avoid getting the last event again
+        Timestamp::from(last_time + 1)
+    } else {
+        Timestamp::now()
+    };
+    
     let two_days_ago = Timestamp::now() - 172800; // 2 days = 172800 seconds
     let filters = vec![
-        Filter::new().since(Timestamp::now()), // everything from now
+        Filter::new().since(since_timestamp), // everything from last event time or now
         Filter::new().kind(Kind::Custom(1059)).since(two_days_ago), // gift wraps - kind 1059 from past 2 days
     ];
+    
+    info!("Subscribing to events since: {}", since_timestamp);
 
     // Subscribe to events
     client.subscribe(filters, None).await?;
@@ -68,8 +92,15 @@ pub async fn run_nostr_client(
                 continue;
             }
 
-            // Skip gift wrap events in the first minutes
+            // Validate event timestamp matches our filter
+            // For gift wraps, check against two_days_ago; for others, check against since_timestamp
             if event.kind == Kind::Custom(1059) {
+                if event.created_at < two_days_ago {
+                    debug!("Skipping gift wrap event older than filter: {} < {}", 
+                        event.created_at, two_days_ago);
+                    continue;
+                }
+                // Skip gift wrap events in the first minutes
                 if let Ok(elapsed) = startup_time.elapsed() {
                     if elapsed < Duration::from_secs(60 * 2) {
                         // Check if event timestamp is before startup time
@@ -79,9 +110,26 @@ pub async fn run_nostr_client(
                         }
                     }
                 }
+            } else {
+                // For non-gift-wrap events, check against since_timestamp
+                if event.created_at < since_timestamp {
+                    debug!("Skipping event older than filter: {} < {}", 
+                        event.created_at, since_timestamp);
+                    continue;
+                }
             }
 
             seen_events.put(event_id, ());
+
+            // Save the current system time as last event received time
+            let current_time = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            
+            if let Err(e) = db_handler.save_last_event_time(current_time) {
+                error!("Failed to save last event time: {}", e);
+            }
 
             if let Err(e) = handle_event(*event, db_handler.clone(), settings.clone()).await {
                 error!("Error handling event: {}", e);
