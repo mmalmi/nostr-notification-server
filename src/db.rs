@@ -17,6 +17,7 @@ pub struct DbHandler {
     pub social_graph: SocialGraph,
     pub profiles: ProfileHandler,
     metadata: Database<Str, Bytes>,
+    seen_events: Database<Str, U8>,
 }
 
 impl DbHandler {
@@ -30,15 +31,16 @@ impl DbHandler {
                 .open(&settings.db_path)?
         };
 
-        let (subscriptions, subscriptions_by_p_tag_and_id, subscriptions_by_pubkey_and_id, subscriptions_by_author_and_id, metadata) = {
+        let (subscriptions, subscriptions_by_p_tag_and_id, subscriptions_by_pubkey_and_id, subscriptions_by_author_and_id, metadata, seen_events) = {
             let mut wtxn = environment.write_txn()?;
             let subscriptions = environment.create_database(&mut wtxn, Some("subscriptions"))?;
             let subscriptions_by_p_tag_and_id = environment.create_database(&mut wtxn, Some("subscriptions_by_p_tag_and_id"))?;
             let subscriptions_by_pubkey_and_id = environment.create_database(&mut wtxn, Some("subscriptions_by_pubkey_and_id"))?;
             let subscriptions_by_author_and_id = environment.create_database(&mut wtxn, Some("subscriptions_by_author_and_id"))?;
             let metadata = environment.create_database(&mut wtxn, Some("metadata"))?;
+            let seen_events = environment.create_database(&mut wtxn, Some("seen_events"))?;
             wtxn.commit()?;
-            (subscriptions, subscriptions_by_p_tag_and_id, subscriptions_by_pubkey_and_id, subscriptions_by_author_and_id, metadata)
+            (subscriptions, subscriptions_by_p_tag_and_id, subscriptions_by_pubkey_and_id, subscriptions_by_author_and_id, metadata, seen_events)
         };
 
         let root_pubkey = &settings.social_graph_root_pubkey;
@@ -73,6 +75,7 @@ impl DbHandler {
             social_graph,
             profiles,
             metadata,
+            seen_events,
         })
     }
 
@@ -271,6 +274,47 @@ impl DbHandler {
                 }
             });
         Ok(result)
+    }
+
+    pub fn has_seen_event(&self, event_id: &str) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+        let rtxn = self.env.read_txn()?;
+        Ok(self.seen_events.get(&rtxn, event_id)?.is_some())
+    }
+
+    pub fn mark_event_seen(&self, event_id: &str, max_events: usize) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut wtxn = self.env.write_txn()?;
+        
+        // Check current count and clean up if needed
+        let current_count = self.seen_events.len(&wtxn)?;
+        if current_count >= max_events as u64 {
+            // Remove oldest entries (FIFO cleanup - simple approach)
+            let to_remove = (current_count - max_events as u64 / 2) as usize;
+            let mut removed = 0;
+            let mut keys_to_remove = Vec::new();
+            
+            for result in self.seen_events.iter(&wtxn)? {
+                if let Ok((key, _)) = result {
+                    if removed >= to_remove {
+                        break;
+                    }
+                    keys_to_remove.push(key.to_string());
+                    removed += 1;
+                }
+            }
+            
+            for key in keys_to_remove {
+                self.seen_events.delete(&mut wtxn, &key)?;
+            }
+        }
+        
+        self.seen_events.put(&mut wtxn, event_id, &1u8)?;
+        wtxn.commit()?;
+        Ok(())
+    }
+
+    pub fn get_seen_events_count(&self) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
+        let rtxn = self.env.read_txn()?;
+        Ok(self.seen_events.len(&rtxn)?)
     }
 }
 

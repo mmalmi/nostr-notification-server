@@ -46,6 +46,13 @@ pub async fn start_server() -> tokio::process::Child {
     
     // Create fresh test directory
     fs::create_dir_all("test_db").expect("Failed to create test database directory");
+    
+    start_server_without_cleanup().await
+}
+
+pub async fn start_server_without_cleanup() -> tokio::process::Child {
+    // Ensure test directory exists (but don't clean it)
+    fs::create_dir_all("test_db").ok();
 
     let child = Command::new("cargo")
         .arg("run")

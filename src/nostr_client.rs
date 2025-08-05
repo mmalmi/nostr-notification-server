@@ -4,8 +4,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use log::{error, info, debug, warn};
 use nostr_sdk::{Client, Filter, Keys, RelayPoolNotification, Timestamp, Event, Kind};
 use tokio::time::timeout;
-use clru::CLruCache;
-use std::num::NonZeroUsize;
 
 use crate::config::Settings;
 use crate::db::DbHandler;
@@ -76,8 +74,11 @@ pub async fn run_nostr_client(
     // Get notification receiver
     let mut notifications = client.notifications();
 
-    // Create a CLruCache with capacity of 1000
-    let mut seen_events = CLruCache::new(NonZeroUsize::new(1000).unwrap());
+    // Log seen events count on startup
+    match db_handler.get_seen_events_count() {
+        Ok(count) => info!("Loaded {} seen events from database", count),
+        Err(e) => error!("Failed to get seen events count: {}", e)
+    }
 
     // Handle incoming events
     while let Ok(notification) = notifications.recv().await {
@@ -86,11 +87,6 @@ pub async fn run_nostr_client(
         }
 
         if let RelayPoolNotification::Event { event, .. } = notification {
-            let event_id = event.id.to_string();
-            
-            if seen_events.contains(&event_id) {
-                continue;
-            }
 
             // Validate event timestamp matches our filter
             // For gift wraps, check against two_days_ago; for others, check against since_timestamp
@@ -118,8 +114,6 @@ pub async fn run_nostr_client(
                     continue;
                 }
             }
-
-            seen_events.put(event_id, ());
 
             // Save the current system time as last event received time
             let current_time = SystemTime::now()

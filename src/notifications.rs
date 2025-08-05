@@ -217,6 +217,25 @@ pub async fn handle_incoming_event(
     settings: &Settings,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let start = Instant::now();
+    
+    // Check if we've seen this event before
+    let event_id = event.id.to_string();
+    match db_handler.has_seen_event(&event_id) {
+        Ok(true) => {
+            debug!("Event {} already seen, skipping", event_id);
+            return Ok(());
+        }
+        Ok(false) => {
+            // Mark event as seen to prevent duplicates
+            if let Err(e) = db_handler.mark_event_seen(&event_id, settings.max_seen_events) {
+                error!("Failed to mark event as seen: {}", e);
+            }
+        }
+        Err(e) => {
+            error!("Failed to check seen event: {}", e);
+            // Continue processing to avoid missing events due to DB errors
+        }
+    }
 
     if event.kind == Kind::Metadata {
         db_handler.profiles.handle_event(event)?;

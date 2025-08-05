@@ -560,6 +560,100 @@ async fn test_subscription_author_update(
     assert_eq!(webhooks.len(), 1, "Should receive webhook notification for author's event");
 }
 
+async fn test_seen_events_persistence(
+    client: &Client,
+    push_port: u16,
+    webhook_port: u16,
+    received_pushes: Arc<Mutex<Vec<serde_json::Value>>>,
+    received_webhooks: Arc<Mutex<Vec<serde_json::Value>>>
+) {
+    println!("Testing seen events persistence across server restarts...");
+    
+    // Clear existing notifications
+    received_pushes.lock().await.clear();
+    received_webhooks.lock().await.clear();
+
+    let (subscriber_keys, sender_keys) = get_test_keys_pair(8);
+    let pubkey = subscriber_keys.public_key().to_string();
+
+    // Generate browser keys for web push
+    let browser_keys = generate_browser_keys();
+    let push_subscription = create_push_subscription(
+        &browser_keys,
+        &format!("http://0.0.0.0:{}/push", push_port)
+    );
+
+    // Create subscription
+    let new_subscription = serde_json::json!({
+        "webhooks": [format!("http://0.0.0.0:{}/webhook", webhook_port)],
+        "web_push_subscriptions": [push_subscription],
+        "filter": {
+            "#p": [pubkey]
+        }
+    });
+
+    let response = make_authed_request(
+        client,
+        Method::POST,
+        "http://0.0.0.0:3030/subscriptions",
+        Some(new_subscription)
+    ).await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    // Create and send first event
+    let event = UnsignedEvent::new(
+        sender_keys.public_key(),
+        Timestamp::now(),
+        Kind::from(1),
+        vec![Tag::public_key(subscriber_keys.public_key())],
+        "Test event for persistence".to_string(),
+    ).sign(&sender_keys).expect("Failed to sign event");
+
+    println!("Sending first event (should trigger notifications)...");
+    let response = client
+        .post("http://0.0.0.0:3030/events")
+        .json(&event)
+        .send()
+        .await
+        .expect("Failed to send request");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Wait for notifications
+    sleep(Duration::from_millis(200)).await;
+
+    // Verify first notifications were received
+    let pushes_count_first = received_pushes.lock().await.len();
+    let webhooks_count_first = received_webhooks.lock().await.len();
+    assert_eq!(pushes_count_first, 1, "Should receive first push notification");
+    assert_eq!(webhooks_count_first, 1, "Should receive first webhook notification");
+    
+    println!("✅ First notifications received: {} push, {} webhook", pushes_count_first, webhooks_count_first);
+
+    // Clear notifications for second attempt
+    received_pushes.lock().await.clear();
+    received_webhooks.lock().await.clear();
+
+    // Send the SAME event again (should still trigger notifications since server hasn't restarted)
+    println!("Sending same event again before restart (should be blocked by in-memory cache)...");
+    let response = client
+        .post("http://0.0.0.0:3030/events")
+        .json(&event)
+        .send()
+        .await
+        .expect("Failed to send request");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    sleep(Duration::from_millis(200)).await;
+
+    // After restart, the same event should NOT trigger notifications due to persistent seen_events
+    let pushes_count_second = received_pushes.lock().await.len();
+    let webhooks_count_second = received_webhooks.lock().await.len();
+    assert_eq!(pushes_count_second, 0, "Should NOT receive duplicate push notification before restart");
+    assert_eq!(webhooks_count_second, 0, "Should NOT receive duplicate webhook notification before restart");
+    
+    println!("✅ No duplicate notifications before restart (blocked by persistence)");
+}
+
 #[tokio::test]
 async fn test_integration() {
     let mut child = start_server().await;
@@ -578,7 +672,8 @@ async fn test_integration() {
     test_encrypted_dm_notifications(&client, push_port, webhook_port, received_pushes.clone(), received_webhooks.clone()).await;
     test_failed_push_endpoint_removal(&client, push_port, webhook_port).await;
     test_subscription_cors(&client, push_port, webhook_port).await;
-    test_subscription_author_update(&client, push_port, webhook_port, received_pushes, received_webhooks).await;
+    test_subscription_author_update(&client, push_port, webhook_port, received_pushes.clone(), received_webhooks.clone()).await;
+    test_seen_events_persistence(&client, push_port, webhook_port, received_pushes, received_webhooks).await;
     test_auth_failures(&client, push_port, webhook_port).await;
 
     // Send SIGTERM to the child process
