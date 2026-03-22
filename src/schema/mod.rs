@@ -1,2 +1,2 @@
-#[allow(clippy::all, mismatched_lifetime_syntaxes)]
+#[allow(warnings, clippy::all)]
 pub mod subscription_generated;
