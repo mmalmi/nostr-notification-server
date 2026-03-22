@@ -1,5 +1,5 @@
 # Build stage
-FROM rust:1.85-slim-bullseye AS builder
+FROM rust:1.88-slim-bullseye AS builder
 
 # Install OpenSSL for VAPID key generation
 RUN apt-get update && apt-get install -y pkg-config libssl-dev
