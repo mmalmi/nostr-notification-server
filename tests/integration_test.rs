@@ -1,12 +1,12 @@
-use std::fs;
-use std::sync::Arc;
-use tokio::sync::Mutex;
+use log::debug;
 use nostr_sdk::nostr::{Kind, Tag, TagKind, Timestamp};
 use nostr_sdk::UnsignedEvent;
-use tokio::time::sleep;
-use std::time::Duration;
-use log::debug;
 use reqwest::{Client, Method, StatusCode};
+use std::fs;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::Mutex;
+use tokio::time::sleep;
 
 #[path = "common.rs"]
 mod common;
@@ -14,16 +14,18 @@ use common::*;
 
 async fn test_info_endpoint(client: &Client) {
     let response = client
-        .get("http://0.0.0.0:3030/info")
+        .get("http://127.0.0.1:3030/info")
         .send()
         .await
         .expect("Failed to send request");
 
     assert_eq!(response.status(), reqwest::StatusCode::OK);
-    
-    let json_response = response.json::<serde_json::Value>().await
+
+    let json_response = response
+        .json::<serde_json::Value>()
+        .await
         .expect("Failed to parse JSON response");
-    
+
     assert!(json_response.get("vapid_public_key").is_some());
 }
 
@@ -35,12 +37,12 @@ async fn test_subscription_endpoints(client: &Client, push_port: u16, webhook_po
     let browser_keys = generate_browser_keys();
     let push_subscription = create_push_subscription(
         &browser_keys,
-        &format!("http://0.0.0.0:{}/push", push_port)
+        &format!("http://127.0.0.1:{}/push", push_port),
     );
 
     // Test POST /subscriptions
     let new_subscription = serde_json::json!({
-        "webhooks": [format!("http://0.0.0.0:{}/webhook", webhook_port)],
+        "webhooks": [format!("http://127.0.0.1:{}/webhook", webhook_port)],
         "web_push_subscriptions": [push_subscription],
         "filter": {
             "#p": [pubkey]
@@ -51,51 +53,60 @@ async fn test_subscription_endpoints(client: &Client, push_port: u16, webhook_po
     let response = make_authed_request(
         client,
         reqwest::Method::POST,
-        "http://0.0.0.0:3030/subscriptions",
-        Some(new_subscription.clone())
-    ).await;
+        "http://127.0.0.1:3030/subscriptions",
+        Some(new_subscription.clone()),
+    )
+    .await;
     assert_eq!(response.status(), reqwest::StatusCode::CREATED);
-    
-    let created_response = response.json::<serde_json::Value>().await
+
+    let created_response = response
+        .json::<serde_json::Value>()
+        .await
         .expect("Failed to parse JSON response");
-    let subscription_id = created_response["id"].as_str()
+    let subscription_id = created_response["id"]
+        .as_str()
         .expect("Response should contain subscription ID");
 
     // Check that the subscription ID has a length greater than zero
-    assert!(!subscription_id.is_empty(), "Subscription ID should not be empty");
+    assert!(
+        !subscription_id.is_empty(),
+        "Subscription ID should not be empty"
+    );
 
     // Test GET /subscriptions/:id using the received ID
-    let get_url = format!("http://0.0.0.0:3030/subscriptions/{}", subscription_id);
-    let response = make_authed_request(
-        client,
-        reqwest::Method::GET,
-        &get_url,
-        None
-    ).await;
+    let get_url = format!("http://127.0.0.1:3030/subscriptions/{}", subscription_id);
+    let response = make_authed_request(client, reqwest::Method::GET, &get_url, None).await;
     assert_eq!(response.status(), reqwest::StatusCode::OK);
-    
-    let subscription = response.json::<serde_json::Value>().await
+
+    let subscription = response
+        .json::<serde_json::Value>()
+        .await
         .expect("Failed to parse JSON response");
-    assert_eq!(subscription["webhooks"][0].as_str().unwrap(), 
-               format!("http://0.0.0.0:{}/webhook", webhook_port));
+    assert_eq!(
+        subscription["webhooks"][0].as_str().unwrap(),
+        format!("http://127.0.0.1:{}/webhook", webhook_port)
+    );
 
     // Test GET /subscriptions (list all)
     let response = make_authed_request(
         client,
         reqwest::Method::GET,
-        "http://0.0.0.0:3030/subscriptions",
-        None
-    ).await;
+        "http://127.0.0.1:3030/subscriptions",
+        None,
+    )
+    .await;
     assert_eq!(response.status(), reqwest::StatusCode::OK);
-    
-    let subscriptions = response.json::<serde_json::Map<String, serde_json::Value>>().await
+
+    let subscriptions = response
+        .json::<serde_json::Map<String, serde_json::Value>>()
+        .await
         .expect("Failed to parse JSON response");
     assert_eq!(subscriptions.len(), 1);
     assert!(subscriptions.contains_key(subscription_id));
 
     // Test updating existing subscription
     let updated_subscription = serde_json::json!({
-        "webhooks": [format!("http://0.0.0.0:{}/webhook", webhook_port)],
+        "webhooks": [format!("http://127.0.0.1:{}/webhook", webhook_port)],
         "web_push_subscriptions": [push_subscription],
         "filter": {
             "#p": [pubkey],
@@ -110,27 +121,33 @@ async fn test_subscription_endpoints(client: &Client, push_port: u16, webhook_po
         client,
         reqwest::Method::POST,
         &get_url,
-        Some(updated_subscription)
-    ).await;
+        Some(updated_subscription),
+    )
+    .await;
 
     assert_eq!(response.status(), reqwest::StatusCode::OK);
 
     let response = client
-        .get("http://0.0.0.0:3030")
+        .get("http://127.0.0.1:3030")
         .send()
         .await
         .expect("Failed to send request");
 
     assert_eq!(response.status(), reqwest::StatusCode::OK);
 
-    let json_response = response.json::<serde_json::Value>().await
+    let json_response = response
+        .json::<serde_json::Value>()
+        .await
         .expect("Failed to parse JSON response");
 
     // subscription count should be greater than 0
     assert!(json_response.get("subscriptions").is_some());
     assert!(json_response["subscriptions"].as_u64().unwrap() > 0);
-    
-    assert_eq!(json_response["version"].as_str().unwrap(), env!("CARGO_PKG_VERSION"));
+
+    assert_eq!(
+        json_response["version"].as_str().unwrap(),
+        env!("CARGO_PKG_VERSION")
+    );
 }
 
 async fn test_author_subscription_endpoints(client: &Client, push_port: u16, webhook_port: u16) {
@@ -141,12 +158,12 @@ async fn test_author_subscription_endpoints(client: &Client, push_port: u16, web
     let browser_keys = generate_browser_keys();
     let push_subscription = create_push_subscription(
         &browser_keys,
-        &format!("http://0.0.0.0:{}/push", push_port)
+        &format!("http://127.0.0.1:{}/push", push_port),
     );
 
     // Test POST /subscriptions with author filter
     let new_subscription = serde_json::json!({
-        "webhooks": [format!("http://0.0.0.0:{}/webhook", webhook_port)],
+        "webhooks": [format!("http://127.0.0.1:{}/webhook", webhook_port)],
         "web_push_subscriptions": [push_subscription],
         "filter": {
             "authors": [author_pubkey],
@@ -158,45 +175,49 @@ async fn test_author_subscription_endpoints(client: &Client, push_port: u16, web
     let response = make_authed_request(
         client,
         reqwest::Method::POST,
-        "http://0.0.0.0:3030/subscriptions",
-        Some(new_subscription.clone())
-    ).await;
+        "http://127.0.0.1:3030/subscriptions",
+        Some(new_subscription.clone()),
+    )
+    .await;
     assert_eq!(response.status(), reqwest::StatusCode::CREATED);
-    
-    let created_response = response.json::<serde_json::Value>().await
+
+    let created_response = response
+        .json::<serde_json::Value>()
+        .await
         .expect("Failed to parse JSON response");
-    let subscription_id = created_response["id"].as_str()
+    let subscription_id = created_response["id"]
+        .as_str()
         .expect("Response should contain subscription ID");
 
     // Verify subscription was created correctly
-    let get_url = format!("http://0.0.0.0:3030/subscriptions/{}", subscription_id);
-    let response = make_authed_request(
-        client,
-        reqwest::Method::GET,
-        &get_url,
-        None
-    ).await;
+    let get_url = format!("http://127.0.0.1:3030/subscriptions/{}", subscription_id);
+    let response = make_authed_request(client, reqwest::Method::GET, &get_url, None).await;
     assert_eq!(response.status(), reqwest::StatusCode::OK);
-    
-    let subscription = response.json::<serde_json::Value>().await
+
+    let subscription = response
+        .json::<serde_json::Value>()
+        .await
         .expect("Failed to parse JSON response");
-    
+
     // Verify the filter contains correct author and kind
-    assert_eq!(subscription["filter"]["authors"][0].as_str().unwrap(), author_pubkey);
+    assert_eq!(
+        subscription["filter"]["authors"][0].as_str().unwrap(),
+        author_pubkey
+    );
     assert_eq!(subscription["filter"]["kinds"][0].as_i64().unwrap(), 4);
 }
 
 async fn test_event_endpoint(
-    client: &Client, 
+    client: &Client,
     push_port: u16,
     webhook_port: u16,
     received_pushes: Arc<Mutex<Vec<serde_json::Value>>>,
-    received_webhooks: Arc<Mutex<Vec<serde_json::Value>>>
+    received_webhooks: Arc<Mutex<Vec<serde_json::Value>>>,
 ) {
     // Clear existing notifications
     received_pushes.lock().await.clear();
     received_webhooks.lock().await.clear();
-    
+
     let (subscriber_keys, sender_keys) = get_test_keys_pair(2);
     let pubkey = subscriber_keys.public_key().to_string();
 
@@ -204,12 +225,12 @@ async fn test_event_endpoint(
     let browser_keys = generate_browser_keys();
     let push_subscription = create_push_subscription(
         &browser_keys,
-        &format!("http://0.0.0.0:{}/push", push_port)
+        &format!("http://127.0.0.1:{}/push", push_port),
     );
 
     // Create subscription before sending test event
     let new_subscription = serde_json::json!({
-        "webhooks": [format!("http://0.0.0.0:{}/webhook", webhook_port)],
+        "webhooks": [format!("http://127.0.0.1:{}/webhook", webhook_port)],
         "web_push_subscriptions": [push_subscription],
         "filter": {
             "#p": [pubkey]
@@ -220,9 +241,10 @@ async fn test_event_endpoint(
     let response = make_authed_request(
         client,
         reqwest::Method::POST,
-        "http://0.0.0.0:3030/subscriptions",
-        Some(new_subscription)
-    ).await;
+        "http://127.0.0.1:3030/subscriptions",
+        Some(new_subscription),
+    )
+    .await;
     assert_eq!(response.status(), reqwest::StatusCode::CREATED);
 
     // Test kind 1 event
@@ -234,13 +256,14 @@ async fn test_event_endpoint(
         "Test content".to_string(),
     );
 
-    let event = unsigned_event.sign(&sender_keys)
+    let event = unsigned_event
+        .sign(&sender_keys)
         .expect("Failed to sign event");
 
     println!("Sending test event to server...");
     debug!("Event being sent: {:?}", event);
     let response = client
-        .post("http://0.0.0.0:3030/events")
+        .post("http://127.0.0.1:3030/events")
         .json(&event)
         .send()
         .await
@@ -261,50 +284,77 @@ async fn test_event_endpoint(
 
     // Verify webhook payload format for kind 1 event
     let webhook_payload = &webhooks[0];
-    assert!(webhook_payload.get("event").is_some(), "Payload should contain event");
-    
+    assert!(
+        webhook_payload.get("event").is_some(),
+        "Payload should contain event"
+    );
+
     // Verify event details are present
     let event_details = &webhook_payload["event"];
     assert!(event_details.get("id").is_some(), "Event should contain id");
-    assert!(event_details.get("pubkey").is_some(), "Event should contain author");
-    assert!(event_details.get("kind").is_some(), "Event should contain kind");
-    assert_eq!(event_details["kind"].as_u64().unwrap(), 1, "Event kind should be 1");
-    
-    assert!(webhook_payload.get("title").is_some(), "Payload should contain title");
-    assert!(webhook_payload.get("body").is_some(), "Payload should contain body");
-    assert!(webhook_payload.get("icon").is_some(), "Payload should contain icon");
-    assert!(webhook_payload.get("url").is_some(), "Payload should contain url");
-    
-    assert_eq!(webhook_payload["title"].as_str().unwrap(), "Mention by Someone");
+    assert!(
+        event_details.get("pubkey").is_some(),
+        "Event should contain author"
+    );
+    assert!(
+        event_details.get("kind").is_some(),
+        "Event should contain kind"
+    );
+    assert_eq!(
+        event_details["kind"].as_u64().unwrap(),
+        1,
+        "Event kind should be 1"
+    );
+
+    assert!(
+        webhook_payload.get("title").is_some(),
+        "Payload should contain title"
+    );
+    assert!(
+        webhook_payload.get("body").is_some(),
+        "Payload should contain body"
+    );
+    assert!(
+        webhook_payload.get("icon").is_some(),
+        "Payload should contain icon"
+    );
+    assert!(
+        webhook_payload.get("url").is_some(),
+        "Payload should contain url"
+    );
+
+    assert_eq!(
+        webhook_payload["title"].as_str().unwrap(),
+        "Mention by Someone"
+    );
     assert_eq!(webhook_payload["body"].as_str().unwrap(), "Test content");
-    assert!(webhook_payload["url"].as_str().unwrap().contains("https://iris.to/note1"));
+    assert!(webhook_payload["url"]
+        .as_str()
+        .unwrap()
+        .contains("https://iris.to/note1"));
 }
 
-async fn test_failed_push_endpoint_removal(
-    client: &Client,
-    push_port: u16,
-    webhook_port: u16
-) {
+async fn test_failed_push_endpoint_removal(client: &Client, push_port: u16, webhook_port: u16) {
     let (subscriber_keys, author_keys) = get_test_keys_pair(3);
     let pubkey = subscriber_keys.public_key().to_string();
 
     // Generate browser keys for web push
     let browser_keys = generate_browser_keys();
-    
+
     // Create two push subscriptions - one valid, one with invalid endpoint
     let valid_push = create_push_subscription(
         &browser_keys,
-        &format!("http://0.0.0.0:{}/push", push_port)
+        &format!("http://127.0.0.1:{}/push", push_port),
     );
-    
+
     let invalid_push = create_push_subscription(
         &browser_keys,
-        &format!("http://0.0.0.0:{}/non-existent", push_port) // This will return 404
+        &format!("http://127.0.0.1:{}/non-existent", push_port), // This will return 404
     );
 
     // Create subscription with both endpoints
     let new_subscription = serde_json::json!({
-        "webhooks": [format!("http://0.0.0.0:{}/webhook", webhook_port)],
+        "webhooks": [format!("http://127.0.0.1:{}/webhook", webhook_port)],
         "web_push_subscriptions": [valid_push.clone(), invalid_push.clone()],
         "filter": {
             "#p": [pubkey.clone()]
@@ -315,18 +365,22 @@ async fn test_failed_push_endpoint_removal(
     let response = make_authed_request(
         client,
         reqwest::Method::POST,
-        "http://0.0.0.0:3030/subscriptions",
-        Some(new_subscription)
-    ).await;
-    
+        "http://127.0.0.1:3030/subscriptions",
+        Some(new_subscription),
+    )
+    .await;
+
     assert_eq!(response.status(), reqwest::StatusCode::CREATED);
-    let subscription_id = response.json::<serde_json::Value>().await
-        .unwrap()["id"].as_str().unwrap().to_string();
+    let subscription_id = response.json::<serde_json::Value>().await.unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // Create and send test event
     let event = create_test_event(&author_keys, &pubkey);
-    
-    client.post("http://0.0.0.0:3030/events")
+
+    client
+        .post("http://127.0.0.1:3030/events")
         .json(&event)
         .send()
         .await
@@ -339,16 +393,21 @@ async fn test_failed_push_endpoint_removal(
     let response = make_authed_request(
         client,
         reqwest::Method::GET,
-        &format!("http://0.0.0.0:3030/subscriptions/{}", subscription_id),
-        None
-    ).await;
-    
+        &format!("http://127.0.0.1:3030/subscriptions/{}", subscription_id),
+        None,
+    )
+    .await;
+
     let subscription = response.json::<serde_json::Value>().await.unwrap();
 
     println!("Subscription after event: {:?}", subscription);
     let push_subs = subscription["web_push_subscriptions"].as_array().unwrap();
-    
-    assert_eq!(push_subs.len(), 1, "Should have removed invalid subscription");
+
+    assert_eq!(
+        push_subs.len(),
+        1,
+        "Should have removed invalid subscription"
+    );
     assert_eq!(
         push_subs[0]["endpoint"].as_str().unwrap(),
         valid_push.endpoint,
@@ -362,7 +421,7 @@ async fn test_auth_failures(client: &Client, _push_port: u16, webhook_port: u16)
 
     // Create a test subscription payload
     let new_subscription = serde_json::json!({
-        "webhooks": [format!("http://0.0.0.0:{}/webhook", webhook_port)],
+        "webhooks": [format!("http://127.0.0.1:{}/webhook", webhook_port)],
         "web_push_subscriptions": [],
         "filter": {
             "#p": [pubkey]
@@ -371,7 +430,7 @@ async fn test_auth_failures(client: &Client, _push_port: u16, webhook_port: u16)
 
     // Test with missing authorization header
     let response = client
-        .post("http://0.0.0.0:3030/subscriptions")
+        .post("http://127.0.0.1:3030/subscriptions")
         .json(&new_subscription)
         .send()
         .await
@@ -380,7 +439,7 @@ async fn test_auth_failures(client: &Client, _push_port: u16, webhook_port: u16)
 
     // Test with invalid authorization header format
     let response = client
-        .post("http://0.0.0.0:3030/subscriptions/123")
+        .post("http://127.0.0.1:3030/subscriptions/123")
         .header("Authorization", "InvalidFormat")
         .json(&new_subscription)
         .send()
@@ -390,7 +449,7 @@ async fn test_auth_failures(client: &Client, _push_port: u16, webhook_port: u16)
 
     // Test with invalid signature
     let response = client
-        .post("http://0.0.0.0:3030/subscriptions")
+        .post("http://127.0.0.1:3030/subscriptions")
         .header("Authorization", "Nostr AValidButIncorrectSignatureHere")
         .json(&new_subscription)
         .send()
@@ -404,7 +463,7 @@ async fn test_encrypted_dm_notifications(
     push_port: u16,
     webhook_port: u16,
     received_pushes: Arc<Mutex<Vec<serde_json::Value>>>,
-    received_webhooks: Arc<Mutex<Vec<serde_json::Value>>>
+    received_webhooks: Arc<Mutex<Vec<serde_json::Value>>>,
 ) {
     // Clear existing notifications at the start of the test
     received_pushes.lock().await.clear();
@@ -416,12 +475,12 @@ async fn test_encrypted_dm_notifications(
     let browser_keys = generate_browser_keys();
     let push_subscription = create_push_subscription(
         &browser_keys,
-        &format!("http://0.0.0.0:{}/push", push_port)
+        &format!("http://127.0.0.1:{}/push", push_port),
     );
 
     // Create subscription for DMs
     let new_subscription = serde_json::json!({
-        "webhooks": [format!("http://0.0.0.0:{}/webhook", webhook_port)],
+        "webhooks": [format!("http://127.0.0.1:{}/webhook", webhook_port)],
         "web_push_subscriptions": [push_subscription],
         "filter": {
             "authors": [sender_keys.public_key().to_string()],
@@ -433,9 +492,10 @@ async fn test_encrypted_dm_notifications(
     let response = make_authed_request(
         client,
         Method::POST,
-        "http://0.0.0.0:3030/subscriptions",
-        Some(new_subscription)
-    ).await;
+        "http://127.0.0.1:3030/subscriptions",
+        Some(new_subscription),
+    )
+    .await;
     assert_eq!(response.status(), StatusCode::CREATED);
 
     // Test kind 4 event (encrypted direct message)
@@ -443,16 +503,20 @@ async fn test_encrypted_dm_notifications(
         sender_keys.public_key(),
         Timestamp::now(),
         Kind::EncryptedDirectMessage,
-        vec![Tag::custom(TagKind::custom("header"), vec!["encrypted stuff here"])],
+        vec![Tag::custom(
+            TagKind::custom("header"),
+            vec!["encrypted stuff here"],
+        )],
         "Encrypted content".to_string(),
     );
 
-    let dm_event = unsigned_dm.sign(&sender_keys)
+    let dm_event = unsigned_dm
+        .sign(&sender_keys)
         .expect("Failed to sign DM event");
 
     println!("Sending test DM event to server...");
     let response = client
-        .post("http://0.0.0.0:3030/events")
+        .post("http://127.0.0.1:3030/events")
         .json(&dm_event)
         .send()
         .await
@@ -467,13 +531,20 @@ async fn test_encrypted_dm_notifications(
     assert_eq!(pushes.len(), 1, "Should receive push notification for DM");
 
     let webhooks = received_webhooks.lock().await;
-    assert_eq!(webhooks.len(), 1, "Should receive webhook notification for DM");
+    assert_eq!(
+        webhooks.len(),
+        1,
+        "Should receive webhook notification for DM"
+    );
 
     // Verify DM webhook payload format
     let dm_payload = &webhooks[0];
     assert_eq!(dm_payload["title"].as_str().unwrap(), "DM by Someone");
-    assert_eq!(dm_payload["body"].as_str().unwrap(), "");  // DM content should be empty in notification
-    assert!(dm_payload["url"].as_str().unwrap().contains("https://iris.to/note1"));
+    assert_eq!(dm_payload["body"].as_str().unwrap(), ""); // DM content should be empty in notification
+    assert!(dm_payload["url"]
+        .as_str()
+        .unwrap()
+        .contains("https://iris.to/note1"));
 }
 
 async fn test_subscription_author_update(
@@ -481,7 +552,7 @@ async fn test_subscription_author_update(
     push_port: u16,
     webhook_port: u16,
     received_pushes: Arc<Mutex<Vec<serde_json::Value>>>,
-    received_webhooks: Arc<Mutex<Vec<serde_json::Value>>>
+    received_webhooks: Arc<Mutex<Vec<serde_json::Value>>>,
 ) {
     // Clear existing notifications
     received_pushes.lock().await.clear();
@@ -495,12 +566,12 @@ async fn test_subscription_author_update(
     let browser_keys = generate_browser_keys();
     let push_subscription = create_push_subscription(
         &browser_keys,
-        &format!("http://0.0.0.0:{}/push", push_port)
+        &format!("http://127.0.0.1:{}/push", push_port),
     );
 
     // Create initial subscription without author filter
     let initial_subscription = serde_json::json!({
-        "webhooks": [format!("http://0.0.0.0:{}/webhook", webhook_port)],
+        "webhooks": [format!("http://127.0.0.1:{}/webhook", webhook_port)],
         "web_push_subscriptions": [push_subscription],
         "filter": {
             "kinds": [1]
@@ -511,17 +582,20 @@ async fn test_subscription_author_update(
     let response = make_authed_request(
         client,
         Method::POST,
-        "http://0.0.0.0:3030/subscriptions",
-        Some(initial_subscription)
-    ).await;
+        "http://127.0.0.1:3030/subscriptions",
+        Some(initial_subscription),
+    )
+    .await;
     assert_eq!(response.status(), StatusCode::CREATED);
-    
-    let subscription_id = response.json::<serde_json::Value>().await
-        .unwrap()["id"].as_str().unwrap().to_string();
+
+    let subscription_id = response.json::<serde_json::Value>().await.unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // Update subscription to include author filter
     let updated_subscription = serde_json::json!({
-        "webhooks": [format!("http://0.0.0.0:{}/webhook", webhook_port)],
+        "webhooks": [format!("http://127.0.0.1:{}/webhook", webhook_port)],
         "web_push_subscriptions": [push_subscription],
         "filter": {
             "authors": [author_pubkey],
@@ -533,16 +607,17 @@ async fn test_subscription_author_update(
     let response = make_authed_request(
         client,
         Method::POST,
-        &format!("http://0.0.0.0:3030/subscriptions/{}", subscription_id),
-        Some(updated_subscription)
-    ).await;
+        &format!("http://127.0.0.1:3030/subscriptions/{}", subscription_id),
+        Some(updated_subscription),
+    )
+    .await;
     assert_eq!(response.status(), StatusCode::OK);
 
     // Create and send test event from the author
     let event = create_test_event(&author_keys, &subscriber_pubkey);
-    
+
     let response = client
-        .post("http://0.0.0.0:3030/events")
+        .post("http://127.0.0.1:3030/events")
         .json(&event)
         .send()
         .await
@@ -554,10 +629,159 @@ async fn test_subscription_author_update(
 
     // Verify notifications were received
     let pushes = received_pushes.lock().await;
-    assert_eq!(pushes.len(), 1, "Should receive push notification for author's event");
+    assert_eq!(
+        pushes.len(),
+        1,
+        "Should receive push notification for author's event"
+    );
 
     let webhooks = received_webhooks.lock().await;
-    assert_eq!(webhooks.len(), 1, "Should receive webhook notification for author's event");
+    assert_eq!(
+        webhooks.len(),
+        1,
+        "Should receive webhook notification for author's event"
+    );
+}
+
+async fn test_mobile_subscription_endpoints(client: &Client) {
+    let (subscriber_keys, _) = get_test_keys_pair(9);
+    let pubkey = subscriber_keys.public_key().to_string();
+    let fcm_token = "fcm-test-token-123";
+    let apns_token = "apns-test-token-456";
+
+    let new_subscription = serde_json::json!({
+        "webhooks": [],
+        "web_push_subscriptions": [],
+        "fcm_tokens": [fcm_token],
+        "apns_tokens": [apns_token],
+        "filter": {
+            "#p": [pubkey]
+        }
+    });
+
+    let response = make_authed_request_with_keys(
+        client,
+        Method::POST,
+        "http://127.0.0.1:3030/subscriptions",
+        Some(new_subscription),
+        &subscriber_keys,
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let created = response.json::<serde_json::Value>().await.unwrap();
+    let subscription_id = created["id"].as_str().unwrap();
+
+    let get_url = format!("http://127.0.0.1:3030/subscriptions/{}", subscription_id);
+    let response =
+        make_authed_request_with_keys(client, Method::GET, &get_url, None, &subscriber_keys).await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let subscription = response.json::<serde_json::Value>().await.unwrap();
+    assert_eq!(subscription["fcm_tokens"], serde_json::json!([fcm_token]));
+    assert_eq!(subscription["apns_tokens"], serde_json::json!([apns_token]));
+
+    let response = make_authed_request_with_keys(
+        client,
+        Method::GET,
+        "http://127.0.0.1:3030/subscriptions",
+        None,
+        &subscriber_keys,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let subscriptions = response
+        .json::<serde_json::Map<String, serde_json::Value>>()
+        .await
+        .unwrap();
+    let listed = subscriptions
+        .get(subscription_id)
+        .expect("subscription missing from list");
+    assert_eq!(listed["fcm_tokens"], serde_json::json!([fcm_token]));
+    assert_eq!(listed["apns_tokens"], serde_json::json!([apns_token]));
+}
+
+async fn test_mobile_push_delivery(
+    client: &Client,
+    received_fcm: Arc<Mutex<Vec<serde_json::Value>>>,
+    received_apns: Arc<Mutex<Vec<serde_json::Value>>>,
+) {
+    received_fcm.lock().await.clear();
+    received_apns.lock().await.clear();
+
+    let (subscriber_keys, sender_keys) = get_test_keys_pair(10);
+    let pubkey = subscriber_keys.public_key().to_string();
+    let fcm_token = "fcm-mobile-delivery-token";
+    let apns_token = "apns-mobile-delivery-token";
+
+    let new_subscription = serde_json::json!({
+        "webhooks": [],
+        "web_push_subscriptions": [],
+        "fcm_tokens": [fcm_token],
+        "apns_tokens": [apns_token],
+        "filter": {
+            "kinds": [1060],
+            "#p": [pubkey.clone()]
+        }
+    });
+
+    let response = make_authed_request(
+        client,
+        Method::POST,
+        "http://127.0.0.1:3030/subscriptions",
+        Some(new_subscription),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let event = UnsignedEvent::new(
+        sender_keys.public_key(),
+        Timestamp::now(),
+        Kind::from(1060),
+        vec![Tag::public_key(subscriber_keys.public_key())],
+        "ciphertext".to_string(),
+    )
+    .sign(&sender_keys)
+    .expect("Failed to sign mobile push test event");
+
+    let response = client
+        .post("http://127.0.0.1:3030/events")
+        .json(&event)
+        .send()
+        .await
+        .expect("Failed to send mobile push event");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    sleep(Duration::from_millis(200)).await;
+
+    let fcm_requests = received_fcm.lock().await;
+    assert_eq!(fcm_requests.len(), 1, "Expected one FCM delivery attempt");
+    let fcm = &fcm_requests[0];
+    assert_eq!(fcm["project_id"].as_str().unwrap(), TEST_FCM_PROJECT_ID);
+    assert_eq!(
+        fcm["headers"]["authorization"].as_str().unwrap(),
+        "Bearer test-fcm-access-token"
+    );
+    assert_eq!(fcm["body"]["message"]["token"].as_str().unwrap(), fcm_token);
+    let fcm_event = serde_json::from_str::<serde_json::Value>(
+        fcm["body"]["message"]["data"]["event"].as_str().unwrap(),
+    )
+    .expect("FCM event payload should be JSON");
+    assert_eq!(fcm_event["id"].as_str().unwrap(), event.id.to_hex());
+    assert_eq!(fcm_event["kind"].as_u64().unwrap(), 1060);
+
+    let apns_requests = received_apns.lock().await;
+    assert_eq!(apns_requests.len(), 1, "Expected one APNS delivery attempt");
+    let apns = &apns_requests[0];
+    assert_eq!(apns["token"].as_str().unwrap(), apns_token);
+    assert_eq!(apns["headers"]["apns-topic"].as_str().unwrap(), "to.iris");
+    assert_eq!(apns["headers"]["apns-push-type"].as_str().unwrap(), "alert");
+    assert_eq!(
+        apns["body"]["event"]["id"].as_str().unwrap(),
+        event.id.to_hex()
+    );
+    assert_eq!(apns["body"]["event"]["kind"].as_u64().unwrap(), 1060);
 }
 
 async fn test_seen_events_persistence(
@@ -565,10 +789,10 @@ async fn test_seen_events_persistence(
     push_port: u16,
     webhook_port: u16,
     received_pushes: Arc<Mutex<Vec<serde_json::Value>>>,
-    received_webhooks: Arc<Mutex<Vec<serde_json::Value>>>
+    received_webhooks: Arc<Mutex<Vec<serde_json::Value>>>,
 ) {
     println!("Testing seen events persistence across server restarts...");
-    
+
     // Clear existing notifications
     received_pushes.lock().await.clear();
     received_webhooks.lock().await.clear();
@@ -580,12 +804,12 @@ async fn test_seen_events_persistence(
     let browser_keys = generate_browser_keys();
     let push_subscription = create_push_subscription(
         &browser_keys,
-        &format!("http://0.0.0.0:{}/push", push_port)
+        &format!("http://127.0.0.1:{}/push", push_port),
     );
 
     // Create subscription
     let new_subscription = serde_json::json!({
-        "webhooks": [format!("http://0.0.0.0:{}/webhook", webhook_port)],
+        "webhooks": [format!("http://127.0.0.1:{}/webhook", webhook_port)],
         "web_push_subscriptions": [push_subscription],
         "filter": {
             "#p": [pubkey]
@@ -595,9 +819,10 @@ async fn test_seen_events_persistence(
     let response = make_authed_request(
         client,
         Method::POST,
-        "http://0.0.0.0:3030/subscriptions",
-        Some(new_subscription)
-    ).await;
+        "http://127.0.0.1:3030/subscriptions",
+        Some(new_subscription),
+    )
+    .await;
     assert_eq!(response.status(), StatusCode::CREATED);
 
     // Create and send first event
@@ -607,11 +832,13 @@ async fn test_seen_events_persistence(
         Kind::from(1),
         vec![Tag::public_key(subscriber_keys.public_key())],
         "Test event for persistence".to_string(),
-    ).sign(&sender_keys).expect("Failed to sign event");
+    )
+    .sign(&sender_keys)
+    .expect("Failed to sign event");
 
     println!("Sending first event (should trigger notifications)...");
     let response = client
-        .post("http://0.0.0.0:3030/events")
+        .post("http://127.0.0.1:3030/events")
         .json(&event)
         .send()
         .await
@@ -624,10 +851,19 @@ async fn test_seen_events_persistence(
     // Verify first notifications were received
     let pushes_count_first = received_pushes.lock().await.len();
     let webhooks_count_first = received_webhooks.lock().await.len();
-    assert_eq!(pushes_count_first, 1, "Should receive first push notification");
-    assert_eq!(webhooks_count_first, 1, "Should receive first webhook notification");
-    
-    println!("✅ First notifications received: {} push, {} webhook", pushes_count_first, webhooks_count_first);
+    assert_eq!(
+        pushes_count_first, 1,
+        "Should receive first push notification"
+    );
+    assert_eq!(
+        webhooks_count_first, 1,
+        "Should receive first webhook notification"
+    );
+
+    println!(
+        "✅ First notifications received: {} push, {} webhook",
+        pushes_count_first, webhooks_count_first
+    );
 
     // Clear notifications for second attempt
     received_pushes.lock().await.clear();
@@ -636,7 +872,7 @@ async fn test_seen_events_persistence(
     // Send the SAME event again (should still trigger notifications since server hasn't restarted)
     println!("Sending same event again before restart (should be blocked by in-memory cache)...");
     let response = client
-        .post("http://0.0.0.0:3030/events")
+        .post("http://127.0.0.1:3030/events")
         .json(&event)
         .send()
         .await
@@ -648,38 +884,107 @@ async fn test_seen_events_persistence(
     // After restart, the same event should NOT trigger notifications due to persistent seen_events
     let pushes_count_second = received_pushes.lock().await.len();
     let webhooks_count_second = received_webhooks.lock().await.len();
-    assert_eq!(pushes_count_second, 0, "Should NOT receive duplicate push notification before restart");
-    assert_eq!(webhooks_count_second, 0, "Should NOT receive duplicate webhook notification before restart");
-    
+    assert_eq!(
+        pushes_count_second, 0,
+        "Should NOT receive duplicate push notification before restart"
+    );
+    assert_eq!(
+        webhooks_count_second, 0,
+        "Should NOT receive duplicate webhook notification before restart"
+    );
+
     println!("✅ No duplicate notifications before restart (blocked by persistence)");
 }
 
 #[tokio::test]
 async fn test_integration() {
-    let mut child = start_server().await;
     let client = Client::new();
     let (push_port, received_pushes) = start_mock_push_server().await;
     let (webhook_port, received_webhooks) = start_mock_webhook_server().await;
+    let (fcm_port, received_fcm) = start_mock_fcm_server().await;
+    let (apns_port, received_apns) = start_mock_apns_server().await;
+    let fcm_key_path = "test_db/firebase-key.json";
+    let apns_key_path = "test_db/apns-auth-key.pem";
+    write_mock_fcm_service_account(fcm_key_path, fcm_port);
+    write_test_file(apns_key_path, TEST_APNS_AUTH_KEY_PEM);
+    let mut child = start_server_with_extra_env(vec![
+        (
+            "NNS_FCM_SERVICE_ACCOUNT_KEY".to_string(),
+            fcm_key_path.to_string(),
+        ),
+        (
+            "NNS_FCM_API_BASE_URL".to_string(),
+            format!("http://127.0.0.1:{}", fcm_port),
+        ),
+        ("NNS_APNS_KEY_ID".to_string(), "TESTKEY123".to_string()),
+        ("NNS_APNS_TEAM_ID".to_string(), "TEAM123456".to_string()),
+        ("NNS_APNS_TOPIC".to_string(), "to.iris".to_string()),
+        ("NNS_APNS_ENVIRONMENT".to_string(), "sandbox".to_string()),
+        ("NNS_APNS_AUTH_KEY".to_string(), apns_key_path.to_string()),
+        (
+            "NNS_APNS_API_BASE_URL".to_string(),
+            format!("http://127.0.0.1:{}", apns_port),
+        ),
+    ])
+    .await;
 
     // Clear any existing notifications before starting tests
     received_pushes.lock().await.clear();
     received_webhooks.lock().await.clear();
+    received_fcm.lock().await.clear();
+    received_apns.lock().await.clear();
 
     test_info_endpoint(&client).await;
     test_subscription_endpoints(&client, push_port, webhook_port).await;
     test_author_subscription_endpoints(&client, push_port, webhook_port).await;
-    test_event_endpoint(&client, push_port, webhook_port, received_pushes.clone(), received_webhooks.clone()).await;
-    test_encrypted_dm_notifications(&client, push_port, webhook_port, received_pushes.clone(), received_webhooks.clone()).await;
+    test_event_endpoint(
+        &client,
+        push_port,
+        webhook_port,
+        received_pushes.clone(),
+        received_webhooks.clone(),
+    )
+    .await;
+    test_encrypted_dm_notifications(
+        &client,
+        push_port,
+        webhook_port,
+        received_pushes.clone(),
+        received_webhooks.clone(),
+    )
+    .await;
     test_failed_push_endpoint_removal(&client, push_port, webhook_port).await;
     test_subscription_cors(&client, push_port, webhook_port).await;
-    test_subscription_author_update(&client, push_port, webhook_port, received_pushes.clone(), received_webhooks.clone()).await;
-    test_seen_events_persistence(&client, push_port, webhook_port, received_pushes, received_webhooks).await;
+    test_subscription_author_update(
+        &client,
+        push_port,
+        webhook_port,
+        received_pushes.clone(),
+        received_webhooks.clone(),
+    )
+    .await;
+    test_mobile_subscription_endpoints(&client).await;
+    test_mobile_push_delivery(&client, received_fcm, received_apns).await;
+    test_seen_events_persistence(
+        &client,
+        push_port,
+        webhook_port,
+        received_pushes,
+        received_webhooks,
+    )
+    .await;
     test_auth_failures(&client, push_port, webhook_port).await;
 
     // Send SIGTERM to the child process
-    child.kill().await.expect("Failed to send signal to process");
-    child.wait().await.expect("Failed to wait for process to exit");
-    
+    child
+        .kill()
+        .await
+        .expect("Failed to send signal to process");
+    child
+        .wait()
+        .await
+        .expect("Failed to wait for process to exit");
+
     // Clean up test directory after test
     let _ = fs::remove_dir_all("test_db");
 }
@@ -693,11 +998,11 @@ async fn test_subscription_cors(client: &Client, push_port: u16, webhook_port: u
     let browser_keys = generate_browser_keys();
     let push_subscription = create_push_subscription(
         &browser_keys,
-        &format!("http://0.0.0.0:{}/push", push_port)
+        &format!("http://127.0.0.1:{}/push", push_port),
     );
 
     let new_subscription = serde_json::json!({
-        "webhooks": [format!("http://0.0.0.0:{}/webhook", webhook_port)],
+        "webhooks": [format!("http://127.0.0.1:{}/webhook", webhook_port)],
         "web_push_subscriptions": [push_subscription],
         "filter": {
             "#p": [pubkey]
@@ -708,7 +1013,7 @@ async fn test_subscription_cors(client: &Client, push_port: u16, webhook_port: u
     let response = make_authed_request_with_keys(
         &client,
         Method::POST,
-        "http://0.0.0.0:3030/subscriptions",
+        "http://127.0.0.1:3030/subscriptions",
         Some(new_subscription),
         &subscriber_keys,
     )
@@ -720,15 +1025,9 @@ async fn test_subscription_cors(client: &Client, push_port: u16, webhook_port: u
     let subscription_id = created["id"].as_str().unwrap();
 
     // 2. Test GET subscription with CORS
-    let get_url = format!("http://0.0.0.0:3030/subscriptions/{}", subscription_id);
-    let response = make_authed_request_with_keys(
-        &client,
-        Method::GET,
-        &get_url,
-        None,
-        &subscriber_keys,
-    )
-    .await;
+    let get_url = format!("http://127.0.0.1:3030/subscriptions/{}", subscription_id);
+    let response =
+        make_authed_request_with_keys(&client, Method::GET, &get_url, None, &subscriber_keys).await;
 
     assert_eq!(response.status(), StatusCode::OK);
 
@@ -736,7 +1035,10 @@ async fn test_subscription_cors(client: &Client, push_port: u16, webhook_port: u
     let response = client
         .request(Method::OPTIONS, &get_url)
         .header("Access-Control-Request-Method", "POST")
-        .header("Access-Control-Request-Headers", "authorization, content-type")
+        .header(
+            "Access-Control-Request-Headers",
+            "authorization, content-type",
+        )
         .header("Origin", "*")
         .send()
         .await
@@ -745,17 +1047,31 @@ async fn test_subscription_cors(client: &Client, push_port: u16, webhook_port: u
     assert_eq!(response.status(), StatusCode::OK);
     let headers = response.headers();
     assert_eq!(
-        headers.get("access-control-allow-origin").unwrap().to_str().unwrap(),
+        headers
+            .get("access-control-allow-origin")
+            .unwrap()
+            .to_str()
+            .unwrap(),
         "*"
     );
     assert!(
-        headers.get("access-control-allow-methods").unwrap().to_str().unwrap()
-            .split(",").any(|m| m.trim() == "POST"),
+        headers
+            .get("access-control-allow-methods")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .split(",")
+            .any(|m| m.trim() == "POST"),
         "Should allow POST method"
     );
     assert!(
-        headers.get("access-control-allow-headers").unwrap().to_str().unwrap()
-            .split(",").any(|h| h.trim().eq_ignore_ascii_case("authorization")),
+        headers
+            .get("access-control-allow-headers")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .split(",")
+            .any(|h| h.trim().eq_ignore_ascii_case("authorization")),
         "Should allow Authorization header"
     );
 }

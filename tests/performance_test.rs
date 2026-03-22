@@ -1,20 +1,17 @@
-use reqwest::Client;
-use std::time::{Duration, Instant};
-use std::fs;
-use nostr_sdk::nostr::{Kind, Tag, Timestamp, SecretKey};
+use nostr_sdk::nostr::{Kind, SecretKey, Tag, Timestamp};
 use nostr_sdk::{Keys, UnsignedEvent};
 use rand::Rng;
+use reqwest::Client;
+use std::fs;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 #[path = "common.rs"]
 mod common;
 
 use common::{
-    start_server,
-    get_test_keys_pair,
-    make_authed_request_with_keys,
-    start_mock_push_server,
-    start_mock_webhook_server,
+    get_test_keys_pair, make_authed_request_with_keys, start_mock_push_server,
+    start_mock_webhook_server, start_server,
 };
 
 const SUBSCRIPTION_COUNT: usize = 100;
@@ -34,13 +31,13 @@ async fn create_test_subscriptions(
 
     for i in 0..count {
         let subscription_start = Instant::now();
-        
+
         // Time key generation
         let key_start = Instant::now();
         let mut secret_key_bytes = [0u8; 32];
         rng.fill(&mut secret_key_bytes);
-        let secret_key = SecretKey::from_slice(&secret_key_bytes)
-            .expect("Failed to create secret key");
+        let secret_key =
+            SecretKey::from_slice(&secret_key_bytes).expect("Failed to create secret key");
         let keys = Keys::new(secret_key);
         let pubkey = keys.public_key().to_string();
         let key_time = key_start.elapsed();
@@ -58,9 +55,9 @@ async fn create_test_subscriptions(
         };
 
         let subscription = serde_json::json!({
-            "webhooks": [format!("http://0.0.0.0:{}/webhook", webhook_port)],
+            "webhooks": [format!("http://127.0.0.1:{}/webhook", webhook_port)],
             "web_push_subscriptions": [{
-                "endpoint": format!("http://0.0.0.0:{}/push", push_port),
+                "endpoint": format!("http://127.0.0.1:{}/push", push_port),
                 "auth": "b0h1T9+PxguADzE3J2t3Qw==",
                 "p256dh": "BBvt0/6jK6BfNwEOtek0t7OA/5GNuScH8/5SVeZ9RCCcQ/SmUfSGvde8OMBHTeOQlHbXlsECZ+ew1mISL6WsvDY="
             }],
@@ -72,10 +69,11 @@ async fn create_test_subscriptions(
         let response = make_authed_request_with_keys(
             client,
             reqwest::Method::POST,
-            "http://0.0.0.0:3030/subscriptions",
+            "http://127.0.0.1:3030/subscriptions",
             Some(subscription),
-            &keys
-        ).await;
+            &keys,
+        )
+        .await;
         let post_time = request_start.elapsed();
         assert_eq!(response.status(), reqwest::StatusCode::CREATED);
 
@@ -84,10 +82,11 @@ async fn create_test_subscriptions(
         let list_response = make_authed_request_with_keys(
             client,
             reqwest::Method::GET,
-            "http://0.0.0.0:3030/subscriptions",
+            "http://127.0.0.1:3030/subscriptions",
             None,
-            &keys
-        ).await;
+            &keys,
+        )
+        .await;
         let list_time = list_start.elapsed();
         assert_eq!(list_response.status(), reqwest::StatusCode::OK);
 
@@ -95,7 +94,10 @@ async fn create_test_subscriptions(
             let batch_duration = last_batch_time.elapsed();
             println!("Batch {} - {} stats:", i + 1 - batch_size, i + 1);
             println!("  Total time: {:?}", batch_duration);
-            println!("  Avg per subscription: {:?}", batch_duration / batch_size as u32);
+            println!(
+                "  Avg per subscription: {:?}",
+                batch_duration / batch_size as u32
+            );
             println!("  Last subscription breakdown:");
             println!("    - Key generation: {:?}", key_time);
             println!("    - POST time: {:?}", post_time);
@@ -108,7 +110,10 @@ async fn create_test_subscriptions(
     let total_time = start_time.elapsed();
     println!("\nSubscription creation summary:");
     println!("Total time: {:?}", total_time);
-    println!("Average time per subscription: {:?}", total_time / count as u32);
+    println!(
+        "Average time per subscription: {:?}",
+        total_time / count as u32
+    );
 
     pubkeys
 }
@@ -132,8 +137,9 @@ async fn test_subscription_matching_performance() {
         SUBSCRIPTION_COUNT,
         &target_pubkey,
         push_port,
-        webhook_port
-    ).await;
+        webhook_port,
+    )
+    .await;
     println!("Setup completed in: {:?}", setup_start.elapsed());
 
     // Clear any notifications from setup
@@ -150,7 +156,8 @@ async fn test_subscription_matching_performance() {
         vec![Tag::public_key(subscriber_keys.public_key())],
         "Performance test content".to_string(),
     );
-    let event = unsigned_event.sign(&sender_keys)
+    let event = unsigned_event
+        .sign(&sender_keys)
         .expect("Failed to sign event");
     println!("Event creation time: {:?}", event_creation_start.elapsed());
 
@@ -158,7 +165,7 @@ async fn test_subscription_matching_performance() {
     println!("Sending test event...");
     let send_start = Instant::now();
     let response = client
-        .post("http://0.0.0.0:3030/events")
+        .post("http://127.0.0.1:3030/events")
         .json(&event)
         .send()
         .await
@@ -194,8 +201,11 @@ async fn test_subscription_matching_performance() {
             println!("  Creation time: {:?}", event_creation_start.elapsed());
             println!("  Send time: {:?}", send_start.elapsed());
             println!("  Processing time until webhook: {:?}", total_processing);
-            println!("Total end-to-end time: {:?}", event_creation_start.elapsed());
-        },
+            println!(
+                "Total end-to-end time: {:?}",
+                event_creation_start.elapsed()
+            );
+        }
         Err(_) => println!("❌ Timeout waiting for webhook processing!"),
     }
 
@@ -203,4 +213,4 @@ async fn test_subscription_matching_performance() {
     child.kill().await.expect("Failed to kill server");
     child.wait().await.expect("Failed to wait for server exit");
     let _ = fs::remove_dir_all("test_db");
-} 
+}

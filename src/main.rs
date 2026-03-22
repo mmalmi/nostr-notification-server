@@ -1,37 +1,38 @@
-mod nostr_client;
-mod http_server;
-mod config;
-mod vapid;
-mod db;
-mod subscription;
-mod schema;
-mod filter;
-pub mod web_push;
 pub mod auth;
+mod config;
+mod db;
 pub mod errors;
+mod filter;
+mod http_server;
+pub mod mobile_push;
+mod nostr_client;
 pub mod notifications;
+mod schema;
+mod subscription;
+mod vapid;
+pub mod web_push;
 
-use std::sync::Arc;
-use tokio;
-use log::{info, error, debug};
 use crate::config::Settings;
-use std::time::Duration;
-use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::signal;
-use std::fs;
 use clap::{Parser, Subcommand};
 use env_logger;
+use log::{debug, error, info};
+use std::fs;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+use tokio;
+use tokio::signal;
 
 #[cfg(unix)]
 use tokio::signal::unix::{signal, SignalKind};
 
+use crate::db::DbHandler;
+use nostr_sdk::FromBech32;
+use nostr_sdk::PublicKey;
 use nostr_social_graph::Crawler;
-use nostr_social_graph::SocialGraph;
 use nostr_social_graph::ProfileHandler;
 use nostr_social_graph::SerializedSocialGraph;
-use crate::db::DbHandler;
-use nostr_sdk::PublicKey;
-use nostr_sdk::FromBech32;
+use nostr_social_graph::SocialGraph;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -108,15 +109,11 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             let settings = Arc::clone(&settings_clone);
             let shutdown = Arc::clone(&shutdown_flag_nostr);
 
-            match nostr_client::run_nostr_client(
-                db,
-                settings,
-                shutdown,
-            ).await {
+            match nostr_client::run_nostr_client(db, settings, shutdown).await {
                 Ok(_) => {
                     info!("Nostr client completed successfully. Restarting...");
                     tokio::time::sleep(Duration::from_secs(5)).await;
-                },
+                }
                 Err(e) => {
                     error!("Nostr client error: {}. Restarting in 5 seconds...", e);
                     tokio::time::sleep(Duration::from_secs(5)).await;
@@ -131,11 +128,9 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     debug!("Spawning HTTP server");
     let server = tokio::spawn(async move {
         debug!("HTTP server task started");
-        if let Err(e) = http_server::run_http_server(
-            db_handler_clone,
-            settings_clone,
-            shutdown_flag_http,
-        ).await {
+        if let Err(e) =
+            http_server::run_http_server(db_handler_clone, settings_clone, shutdown_flag_http).await
+        {
             error!("HTTP server error: {}", e);
         }
     });
@@ -184,11 +179,11 @@ async fn run_crawler() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let social_graph = Arc::new(SocialGraph::new(
         &root_hex,
         env.clone(),
-        None as Option<SerializedSocialGraph>
+        None as Option<SerializedSocialGraph>,
     )?);
-    
+
     let profile_handler = Arc::new(ProfileHandler::new(env.clone())?);
-    
+
     let shutdown_flag = Arc::new(AtomicBool::new(false));
     let shutdown_flag_clone = Arc::clone(&shutdown_flag);
 
@@ -213,7 +208,9 @@ async fn run_crawler() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     Ok(())
 }
 
-async fn run_profile_crawler(missing_only: bool) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+async fn run_profile_crawler(
+    missing_only: bool,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Load settings first
     let settings = Arc::new(Settings::new()?);
     debug!("Settings loaded");
@@ -243,11 +240,11 @@ async fn run_profile_crawler(missing_only: bool) -> Result<(), Box<dyn std::erro
     let social_graph = Arc::new(SocialGraph::new(
         &root_hex,
         env.clone(),
-        None as Option<SerializedSocialGraph>
+        None as Option<SerializedSocialGraph>,
     )?);
-    
+
     let profile_handler = Arc::new(ProfileHandler::new(env.clone())?);
-    
+
     let shutdown_flag = Arc::new(AtomicBool::new(false));
     let shutdown_flag_clone = Arc::clone(&shutdown_flag);
 
@@ -264,14 +261,23 @@ async fn run_profile_crawler(missing_only: bool) -> Result<(), Box<dyn std::erro
         shutdown_flag.store(true, Ordering::Relaxed);
     });
 
-    info!("Starting profile crawl ({})", if missing_only { "missing only" } else { "all profiles" });
+    info!(
+        "Starting profile crawl ({})",
+        if missing_only {
+            "missing only"
+        } else {
+            "all profiles"
+        }
+    );
     crawler.crawl_profiles(missing_only).await?;
 
     info!("Profile crawler shutting down");
     Ok(())
 }
 
-async fn run_profile_import(file_path: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+async fn run_profile_import(
+    file_path: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let settings = Arc::new(Settings::new()?);
     println!("Loading profiles from {}", file_path);
 
@@ -284,7 +290,7 @@ async fn run_profile_import(file_path: &str) -> Result<(), Box<dyn std::error::E
 
     let profile_handler = Arc::new(ProfileHandler::new(env.clone())?);
     let file_content = fs::read_to_string(file_path)?;
-    
+
     let before_count = profile_handler.get_profile_count()?;
     let imported = profile_handler.import_from_json(&file_content)?;
     let after_count = profile_handler.get_profile_count()?;

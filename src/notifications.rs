@@ -1,16 +1,17 @@
-use nostr_sdk::prelude::*;
-use nostr_sdk::nostr::{Event, TagStandard};
-use nostr_sdk::{Kind, ToBech32};
-use std::error::Error;
-use std::sync::Arc;
-use log::{debug, error, info};
 use crate::config::Settings;
 use crate::db::DbHandler;
+use crate::mobile_push::{send_apns_push, send_fcm_push};
 use crate::subscription::Subscription;
 use crate::web_push::send_web_push;
-use std::time::Instant;
+use log::{debug, error, info};
+use nostr_sdk::nostr::{Event, TagStandard};
+use nostr_sdk::prelude::*;
+use nostr_sdk::{Kind, ToBech32};
 use serde::Serialize;
 use serde_json;
+use std::error::Error;
+use std::sync::Arc;
+use std::time::Instant;
 
 const MAX_REACTION_LENGTH: usize = 20;
 
@@ -44,22 +45,27 @@ pub struct Author {
 }
 
 pub async fn create_notification_payload(
-    event: &Event, 
+    event: &Event,
     settings: &Settings,
     db_handler: &Arc<DbHandler>,
 ) -> NotificationPayload {
     let pubkey = extract_pubkey(event);
     let event_type = get_event_type(event, db_handler, &pubkey);
-    let author_name = db_handler.profiles.get_name(&pubkey)
+    let author_name = db_handler
+        .profiles
+        .get_name(&pubkey)
         .ok()
         .flatten()
         .unwrap_or_else(|| "Someone".to_string());
-    
+
     let title = create_title(&event_type, &author_name, event.kind);
     let body = create_body(event);
     let icon = get_author_icon(&pubkey, db_handler, settings);
     let event_payload = create_event_payload(event);
-    let note_id = event.id.to_bech32().expect("Failed to convert event id to bech32");
+    let note_id = event
+        .id
+        .to_bech32()
+        .expect("Failed to convert event id to bech32");
 
     NotificationPayload {
         event: event_payload,
@@ -72,7 +78,9 @@ pub async fn create_notification_payload(
 
 fn extract_pubkey(event: &Event) -> String {
     if event.kind == Kind::ZapReceipt {
-        event.tags.iter()
+        event
+            .tags
+            .iter()
             .find_map(|tag| {
                 if let Some(TagStandard::Description(desc)) = tag.as_standardized() {
                     Event::from_json(desc)
@@ -95,29 +103,35 @@ fn get_event_type(event: &Event, db_handler: &Arc<DbHandler>, pubkey: &str) -> S
         Kind::Repost => "Repost".to_string(),
         Kind::ZapReceipt => create_zap_message(event, db_handler, pubkey),
         Kind::Reaction => create_reaction_message(&event.content),
+        _ if event.kind.as_u16() == 1060 => "DM".to_string(),
         _ => "Notification".to_string(),
     }
 }
 
 fn create_zap_message(event: &Event, db_handler: &Arc<DbHandler>, pubkey: &str) -> String {
-    let sender_name = db_handler.profiles.get_name(pubkey)
+    let sender_name = db_handler
+        .profiles
+        .get_name(pubkey)
         .ok()
         .flatten()
         .unwrap_or_else(|| "Someone".to_string());
 
-    let amount = event.tags.iter()
-        .find_map(|tag| {
-            if let Some(TagStandard::Amount { millisats, .. }) = tag.as_standardized() {
-                Some(millisats)
-            } else {
-                None
-            }
-        });
+    let amount = event.tags.iter().find_map(|tag| {
+        if let Some(TagStandard::Amount { millisats, .. }) = tag.as_standardized() {
+            Some(millisats)
+        } else {
+            None
+        }
+    });
 
     match amount {
         Some(millisats) => {
             if *millisats < 1000 {
-                format!("{} zapped {:.3} sats", sender_name, *millisats as f64 / 1000.0)
+                format!(
+                    "{} zapped {:.3} sats",
+                    sender_name,
+                    *millisats as f64 / 1000.0
+                )
             } else {
                 format!("{} zapped {} sats", sender_name, millisats / 1000)
             }
@@ -131,7 +145,13 @@ fn create_zap_message(event: &Event, db_handler: &Arc<DbHandler>, pubkey: &str) 
 
 fn create_reaction_message(content: &str) -> String {
     let reaction_content = if content.chars().count() > MAX_REACTION_LENGTH {
-        format!("{}...", content.chars().take(MAX_REACTION_LENGTH).collect::<String>())
+        format!(
+            "{}...",
+            content
+                .chars()
+                .take(MAX_REACTION_LENGTH)
+                .collect::<String>()
+        )
     } else {
         content.to_string()
     };
@@ -157,14 +177,23 @@ fn create_body(event: &Event) -> String {
     match event.kind {
         Kind::TextNote => {
             if event.content.chars().count() > MAX_BODY_LENGTH {
-                format!("{}...", event.content.chars().take(MAX_BODY_LENGTH).collect::<String>())
+                format!(
+                    "{}...",
+                    event
+                        .content
+                        .chars()
+                        .take(MAX_BODY_LENGTH)
+                        .collect::<String>()
+                )
             } else {
                 event.content.clone()
             }
-        },
+        }
         Kind::ZapReceipt => {
             // Extract zap comment from the description tag
-            event.tags.iter()
+            event
+                .tags
+                .iter()
                 .find_map(|tag| {
                     if let Some(TagStandard::Description(desc)) = tag.as_standardized() {
                         Event::from_json(desc)
@@ -175,13 +204,16 @@ fn create_body(event: &Event) -> String {
                     }
                 })
                 .unwrap_or_default()
-        },
-        _ => String::new()
+        }
+        _ if event.kind.as_u16() == 1060 => "New message".to_string(),
+        _ => String::new(),
     }
 }
 
 fn get_author_icon(pubkey: &str, db_handler: &Arc<DbHandler>, settings: &Settings) -> String {
-    db_handler.profiles.get_picture(pubkey)
+    db_handler
+        .profiles
+        .get_picture(pubkey)
         .ok()
         .flatten()
         .unwrap_or_else(|| settings.icon_url.clone())
@@ -199,15 +231,12 @@ fn create_event_payload(event: &Event) -> EventPayload {
 }
 
 async fn send_webhook(
-    webhook_url: &str, 
-    payload: &NotificationPayload
+    webhook_url: &str,
+    payload: &NotificationPayload,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let client = reqwest::Client::new();
-    
-    client.post(webhook_url)
-        .json(&payload)
-        .send()
-        .await?;
+
+    client.post(webhook_url).json(&payload).send().await?;
     Ok(())
 }
 
@@ -217,7 +246,7 @@ pub async fn handle_incoming_event(
     settings: &Settings,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let start = Instant::now();
-    
+
     // Check if we've seen this event before
     let event_id = event.id.to_string();
     match db_handler.has_seen_event(&event_id) {
@@ -243,22 +272,38 @@ pub async fn handle_incoming_event(
         db_handler.social_graph.handle_event(event)?;
     }
 
-    debug!("Processing event with kind: {} and content: {}", event.kind, 
-           &event.content.chars().take(50).collect::<String>());
-    
+    debug!(
+        "Processing event with kind: {} and content: {}",
+        event.kind,
+        &event.content.chars().take(50).collect::<String>()
+    );
+
     // Process author subscriptions
     let author = event.pubkey.to_hex();
     process_author(&author, event, &db_handler, settings).await?;
 
     // Process p-tag subscriptions
-    for tag in event.tags.iter() {
-        if let Some(p_value) = extract_p_tag_value(tag) {
-            let tag_start = Instant::now();
-            process_p_tag(p_value, event, &db_handler, settings).await?;
-            debug!("Tag processing took: {:?}", tag_start.elapsed());
+    let p_tag_count = event
+        .tags
+        .iter()
+        .filter(|tag| extract_p_tag_value(tag).is_some())
+        .count();
+
+    if settings.max_p_tags > 0 && p_tag_count > settings.max_p_tags {
+        debug!(
+            "Skipping p-tag notifications for event {} with {} p tags (max: {})",
+            event.id, p_tag_count, settings.max_p_tags
+        );
+    } else {
+        for tag in event.tags.iter() {
+            if let Some(p_value) = extract_p_tag_value(tag) {
+                let tag_start = Instant::now();
+                process_p_tag(p_value, event, &db_handler, settings).await?;
+                debug!("Tag processing took: {:?}", tag_start.elapsed());
+            }
         }
     }
-    
+
     debug!("Total event processing took: {:?}", start.elapsed());
     Ok(())
 }
@@ -269,13 +314,16 @@ async fn process_author(
     db_handler: &Arc<DbHandler>,
     settings: &Settings,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let has_header = event.tags.iter().any(|tag| tag.as_slice().get(0).map_or(false, |v| *v == "header"));
+    let has_header = event
+        .tags
+        .iter()
+        .any(|tag| tag.as_slice().get(0).map_or(false, |v| *v == "header"));
     let should_log_info = event.kind == Kind::Replaceable(30078) && has_header;
-    
+
     if should_log_info {
         info!("Processing author: {} for event: {}", author, event.id);
     }
-    
+
     let subscriptions = db_handler.get_subscriptions_by_author(author)?;
     if subscriptions.is_empty() {
         if should_log_info {
@@ -283,11 +331,15 @@ async fn process_author(
         }
         return Ok(());
     }
-    
+
     if should_log_info {
-        info!("Found {} subscriptions for author: {}", subscriptions.len(), author);
+        info!(
+            "Found {} subscriptions for author: {}",
+            subscriptions.len(),
+            author
+        );
     }
-    
+
     for (subscription_id, subscription) in subscriptions {
         if should_log_info {
             info!("Processing subscription: {:?}", subscription);
@@ -301,11 +353,13 @@ async fn process_author(
             tokio::spawn(async move {
                 if let Err(e) = send_notifications(
                     subscription,
-                    &subscription_id,  // Pass the ID here
-                    event_clone, 
-                    Arc::new(settings_clone), 
-                    db_handler_clone
-                ).await {
+                    &subscription_id, // Pass the ID here
+                    event_clone,
+                    Arc::new(settings_clone),
+                    db_handler_clone,
+                )
+                .await
+                {
                     error!("Failed to send notification: {}", e);
                 }
             });
@@ -330,15 +384,19 @@ async fn process_p_tag(
     settings: &Settings,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     debug!("Processing p_tag: {} for event: {}", p_value, event.id);
-    
+
     let subscriptions = db_handler.get_subscriptions_by_p_tag(p_value)?;
     if subscriptions.is_empty() {
         debug!("No subscriptions found for p_tag: {}", p_value);
         return Ok(());
     }
-    
-    debug!("Found {} subscriptions for p_tag: {}", subscriptions.len(), p_value);
-    
+
+    debug!(
+        "Found {} subscriptions for p_tag: {}",
+        subscriptions.len(),
+        p_value
+    );
+
     for (subscription_id, subscription) in subscriptions {
         debug!("Processing subscription: {:?}", subscription);
         if subscription.matches_event(event) {
@@ -350,11 +408,13 @@ async fn process_p_tag(
             tokio::spawn(async move {
                 if let Err(e) = send_notifications(
                     subscription,
-                    &subscription_id,  // Pass the ID here
-                    event_clone, 
-                    Arc::new(settings_clone), 
-                    db_handler_clone
-                ).await {
+                    &subscription_id, // Pass the ID here
+                    event_clone,
+                    Arc::new(settings_clone),
+                    db_handler_clone,
+                )
+                .await
+                {
                     error!("Failed to send notification: {}", e);
                 }
             });
@@ -364,7 +424,7 @@ async fn process_p_tag(
 }
 
 pub async fn send_notifications(
-    mut subscription: Subscription, 
+    mut subscription: Subscription,
     subscription_id: &str,
     event: Event,
     settings: Arc<Settings>,
@@ -376,7 +436,9 @@ pub async fn send_notifications(
     for webhook_url in subscription.webhooks.clone() {
         let payload = payload.clone();
         tasks.push(tokio::spawn(async move {
-            send_webhook(&webhook_url, &payload).await.map(|_| None)
+            send_webhook(&webhook_url, &payload)
+                .await
+                .map(|_| NotificationTargetRemoval::default())
         }));
     }
 
@@ -384,33 +446,86 @@ pub async fn send_notifications(
         let payload = payload.clone();
         let settings = settings.clone();
         tasks.push(tokio::spawn(async move {
-            send_web_push(&push_sub, &payload, &settings).await.map(|should_remove| {
-                if should_remove {
-                    Some(push_sub.endpoint)
-                } else {
-                    None
-                }
-            })
+            send_web_push(&push_sub, &payload, &settings)
+                .await
+                .map(|should_remove| NotificationTargetRemoval {
+                    web_push_endpoint: should_remove.then_some(push_sub.endpoint),
+                    fcm_token: None,
+                    apns_token: None,
+                })
+        }));
+    }
+
+    for fcm_token in subscription.fcm_tokens.clone() {
+        let payload = payload.clone();
+        let settings = settings.clone();
+        tasks.push(tokio::spawn(async move {
+            send_fcm_push(&fcm_token, &payload, &settings)
+                .await
+                .map(|should_remove| NotificationTargetRemoval {
+                    web_push_endpoint: None,
+                    fcm_token: should_remove.then_some(fcm_token),
+                    apns_token: None,
+                })
+        }));
+    }
+
+    for apns_token in subscription.apns_tokens.clone() {
+        let payload = payload.clone();
+        let settings = settings.clone();
+        tasks.push(tokio::spawn(async move {
+            send_apns_push(&apns_token, &payload, &settings)
+                .await
+                .map(|should_remove| NotificationTargetRemoval {
+                    web_push_endpoint: None,
+                    fcm_token: None,
+                    apns_token: should_remove.then_some(apns_token),
+                })
         }));
     }
 
     let mut endpoints_to_remove = Vec::new();
+    let mut fcm_tokens_to_remove = Vec::new();
+    let mut apns_tokens_to_remove = Vec::new();
     for task in tasks {
         match task.await? {
-            Ok(Some(endpoint)) => {
-                endpoints_to_remove.push(endpoint);
+            Ok(removal) => {
+                if let Some(endpoint) = removal.web_push_endpoint {
+                    endpoints_to_remove.push(endpoint);
+                }
+                if let Some(token) = removal.fcm_token {
+                    fcm_tokens_to_remove.push(token);
+                }
+                if let Some(token) = removal.apns_token {
+                    apns_tokens_to_remove.push(token);
+                }
             }
-            _ => {}
+            Err(error) => {
+                error!("Notification delivery task failed: {}", error);
+            }
         }
     }
 
-    if !endpoints_to_remove.is_empty() {
-        subscription.web_push_subscriptions.retain(|sub| 
-            !endpoints_to_remove.contains(&sub.endpoint)
-        );
+    if !endpoints_to_remove.is_empty()
+        || !fcm_tokens_to_remove.is_empty()
+        || !apns_tokens_to_remove.is_empty()
+    {
+        subscription
+            .web_push_subscriptions
+            .retain(|sub| !endpoints_to_remove.contains(&sub.endpoint));
+        subscription
+            .fcm_tokens
+            .retain(|token| !fcm_tokens_to_remove.contains(token));
+        subscription
+            .apns_tokens
+            .retain(|token| !apns_tokens_to_remove.contains(token));
 
         if !subscription.is_empty() {
-            db_handler.save_subscription(&subscription.subscriber, subscription_id, &subscription)?;
+            db_handler.save_subscription(
+                &subscription.subscriber,
+                subscription_id,
+                &subscription,
+            )?;
         }
     }
 
@@ -419,4 +534,11 @@ pub async fn send_notifications(
     }
 
     Ok(())
+}
+
+#[derive(Default)]
+struct NotificationTargetRemoval {
+    web_push_endpoint: Option<String>,
+    fcm_token: Option<String>,
+    apns_token: Option<String>,
 }

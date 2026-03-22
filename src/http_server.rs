@@ -1,18 +1,18 @@
-use warp::{Filter, Reply, Rejection};
-use warp::path::FullPath;
-use warp::http::{Method, StatusCode};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use log::{info, error, debug};
+use log::{debug, error, info};
 use nostr_sdk::Event;
 use std::convert::Infallible;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use uuid::Uuid;
 use warp::cors::Cors;
+use warp::http::{Method, StatusCode};
+use warp::path::FullPath;
+use warp::{Filter, Rejection, Reply};
 
+use crate::auth::verify_nostr_auth;
 use crate::config::Settings;
 use crate::db::DbHandler;
-use crate::auth::verify_nostr_auth;
-use crate::errors::{CustomRejection, clean_error_message};
+use crate::errors::{clean_error_message, CustomRejection};
 use crate::notifications::handle_incoming_event;
 use crate::subscription::Subscription;
 
@@ -56,7 +56,8 @@ pub async fn run_http_server(
     let settings_filter = with_settings(settings.clone());
 
     let _log = warp::log::custom(|info| {
-        info!("{} {} {} {}ms - {}", 
+        info!(
+            "{} {} {} {}ms - {}",
             info.method(),
             info.path(),
             info.status(),
@@ -72,63 +73,69 @@ pub async fn run_http_server(
     let auth = warp::header::optional::<String>("authorization")
         .and(warp::path::full())
         .and(warp::method())
-        .and_then(move |auth_header: Option<String>, path: FullPath, method: Method| {
-            let base_url = base_url.clone();
-            async move {
-                // Skip auth check for OPTIONS requests
-                if method == Method::OPTIONS {
-                    return Ok(String::new());  // Empty string as pubkey for OPTIONS
-                }
+        .and_then(
+            move |auth_header: Option<String>, path: FullPath, method: Method| {
+                let base_url = base_url.clone();
+                async move {
+                    // Skip auth check for OPTIONS requests
+                    if method == Method::OPTIONS {
+                        return Ok(String::new()); // Empty string as pubkey for OPTIONS
+                    }
 
-                // First check if auth header exists
-                let auth_str = auth_header.ok_or_else(|| {
-                    warp::reject::custom(CustomRejection {
-                        message: "Missing authorization header".to_string(),
-                        error_type: "AuthError".to_string(),
-                    })
-                })?;
-
-                // Then verify the auth
-                match verify_nostr_auth(
-                    Some(auth_str),
-                    &format!("{}{}", base_url, path.as_str()),
-                    method.as_str(),
-                ).await {
-                    Ok(pubkey) => {
-                        Ok(pubkey)
-                    },
-                    Err(e) => {
-                        info!("Auth failed: {:?}", e);
-                        Err(warp::reject::custom(CustomRejection {
-                            message: "Invalid authorization".to_string(),
+                    // First check if auth header exists
+                    let auth_str = auth_header.ok_or_else(|| {
+                        warp::reject::custom(CustomRejection {
+                            message: "Missing authorization header".to_string(),
                             error_type: "AuthError".to_string(),
-                        }))
+                        })
+                    })?;
+
+                    // Then verify the auth
+                    match verify_nostr_auth(
+                        Some(auth_str),
+                        &format!("{}{}", base_url, path.as_str()),
+                        method.as_str(),
+                    )
+                    .await
+                    {
+                        Ok(pubkey) => Ok(pubkey),
+                        Err(e) => {
+                            info!("Auth failed: {:?}", e);
+                            Err(warp::reject::custom(CustomRejection {
+                                message: "Invalid authorization".to_string(),
+                                error_type: "AuthError".to_string(),
+                            }))
+                        }
                     }
                 }
-            }
-        });
+            },
+        );
 
     let subscriptions = warp::path("subscriptions")
         .and(db_filter.clone())
         .and(settings_filter.clone())
         .and(auth.clone());
 
-    let get_subscriptions = subscriptions.clone()
+    let get_subscriptions = subscriptions
+        .clone()
         .and(warp::get())
         .and_then(handle_get_subscriptions);
 
-    let get_subscription = subscriptions.clone()
+    let get_subscription = subscriptions
+        .clone()
         .and(warp::get())
         .and(warp::path::param::<String>())
         .and_then(handle_get_subscription);
 
-    let update_subscription = subscriptions.clone()
+    let update_subscription = subscriptions
+        .clone()
         .and(warp::post())
         .and(warp::path::param::<String>())
         .and(warp::body::json())
         .and_then(handle_update_subscription);
 
-    let post_subscription = subscriptions.clone()
+    let post_subscription = subscriptions
+        .clone()
         .and(warp::post())
         .and(warp::body::json())
         .and_then(handle_post_subscription);
@@ -169,10 +176,7 @@ pub async fn run_http_server(
 
     // Create server
     let (addr, server) = warp::serve(routes)
-        .bind_with_graceful_shutdown(
-            ([0, 0, 0, 0], port),
-            shutdown_signal(shutdown_flag)
-        );
+        .bind_with_graceful_shutdown(([0, 0, 0, 0], port), shutdown_signal(shutdown_flag));
 
     info!("Server running on http://{}", addr);
     server.await;
@@ -188,7 +192,8 @@ async fn handle_get_subscriptions(
 ) -> Result<impl warp::Reply, warp::Rejection> {
     match db.get_subscriptions_for_pubkey(&auth_pubkey) {
         Ok(subscriptions) => {
-            let response: serde_json::Map<String, serde_json::Value> = subscriptions.into_iter()
+            let response: serde_json::Map<String, serde_json::Value> = subscriptions
+                .into_iter()
                 .map(|(id, sub)| (id, serde_json::to_value(sub).unwrap()))
                 .collect();
             Ok(warp::reply::json(&response))
@@ -210,12 +215,8 @@ async fn handle_get_subscription(
     id: String,
 ) -> Result<impl warp::Reply, warp::Rejection> {
     match db.get_subscription(&auth_pubkey, &id) {
-        Ok(Some(subscription)) => {
-            Ok(warp::reply::json(&subscription))
-        }
-        Ok(None) => {
-            Err(warp::reject::not_found())
-        }
+        Ok(Some(subscription)) => Ok(warp::reply::json(&subscription)),
+        Ok(None) => Err(warp::reject::not_found()),
         Err(e) => {
             error!("Database error while getting subscription: {}", e);
             Err(warp::reject::custom(CustomRejection {
@@ -234,17 +235,18 @@ async fn handle_post_subscription(
 ) -> Result<impl Reply, Rejection> {
     if subscription.is_empty() {
         return Err(warp::reject::custom(CustomRejection {
-            message: "Subscription must contain at least one webhook or web push subscription".to_string(),
+            message: "Subscription must contain at least one delivery target".to_string(),
             error_type: "ValidationError".to_string(),
         }));
     }
 
     let id = Uuid::new_v4().to_string();
-    
+
     // Set the subscriber to match the authenticated user
     subscription.subscriber = auth_pubkey.clone();
-    
-    db_handler.save_subscription(&auth_pubkey, &id, &subscription)
+
+    db_handler
+        .save_subscription(&auth_pubkey, &id, &subscription)
         .map_err(|e| {
             error!("Database error saving new subscription: {}", e);
             warp::reject::custom(CustomRejection {
@@ -258,7 +260,7 @@ async fn handle_post_subscription(
             "id": id,
             "status": "Created"
         })),
-        StatusCode::CREATED
+        StatusCode::CREATED,
     ))
 }
 
@@ -284,7 +286,7 @@ async fn handle_post_event(
     event: Event,
 ) -> Result<impl Reply, Rejection> {
     debug!("Received event: {:?}", event);
-    
+
     // Measure signature verification time
     let start = std::time::Instant::now();
     let verify_result = event.verify();
@@ -309,21 +311,17 @@ async fn handle_post_event(
 
     Ok(warp::reply::with_status(
         warp::reply::json(&"Event accepted"),
-        StatusCode::OK
+        StatusCode::OK,
     ))
 }
 
-async fn handle_info(
-    settings: Arc<Settings>,
-) -> Result<impl Reply, Rejection> {
+async fn handle_info(settings: Arc<Settings>) -> Result<impl Reply, Rejection> {
     Ok(warp::reply::json(&serde_json::json!({
         "vapid_public_key": settings.vapid_public_key,
     })))
 }
 
-async fn handle_root(
-    db: Arc<DbHandler>,
-) -> Result<impl Reply, Rejection> {
+async fn handle_root(db: Arc<DbHandler>) -> Result<impl Reply, Rejection> {
     let stats = db.get_stats().map_err(|e| {
         error!("Database error getting stats: {}", e);
         warp::reject::custom(CustomRejection {
@@ -349,8 +347,9 @@ async fn handle_update_subscription(
 ) -> Result<impl Reply, Rejection> {
     // Set the subscriber to match the authenticated user
     subscription.subscriber = auth_pubkey.clone();
-    
-    db_handler.save_subscription(&auth_pubkey, &id, &subscription)
+
+    db_handler
+        .save_subscription(&auth_pubkey, &id, &subscription)
         .map_err(|e| {
             error!("Database error updating subscription: {}", e);
             warp::reject::custom(CustomRejection {
@@ -363,7 +362,7 @@ async fn handle_update_subscription(
         warp::reply::json(&serde_json::json!({
             "status": "Updated"
         })),
-        StatusCode::OK
+        StatusCode::OK,
     ))
 }
 
@@ -374,11 +373,15 @@ async fn shutdown_signal(shutdown_flag: Arc<AtomicBool>) {
 }
 
 // Helper function to share db with routes
-fn with_db(db: Arc<DbHandler>) -> impl Filter<Extract = (Arc<DbHandler>,), Error = Infallible> + Clone {
+fn with_db(
+    db: Arc<DbHandler>,
+) -> impl Filter<Extract = (Arc<DbHandler>,), Error = Infallible> + Clone {
     warp::any().map(move || db.clone())
 }
 
 // Helper function to share settings with routes
-fn with_settings(settings: Arc<Settings>) -> impl Filter<Extract = (Arc<Settings>,), Error = Infallible> + Clone {
+fn with_settings(
+    settings: Arc<Settings>,
+) -> impl Filter<Extract = (Arc<Settings>,), Error = Infallible> + Clone {
     warp::any().map(move || settings.clone())
 }
