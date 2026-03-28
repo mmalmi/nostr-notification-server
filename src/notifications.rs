@@ -11,7 +11,7 @@ use serde::Serialize;
 use serde_json;
 use std::error::Error;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 const MAX_REACTION_LENGTH: usize = 20;
 
@@ -94,6 +94,41 @@ fn extract_pubkey(event: &Event) -> String {
     } else {
         event.pubkey.to_hex()
     }
+}
+
+fn current_unix_timestamp() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn subscription_allows_event(
+    subscription: &Subscription,
+    event: &Event,
+    db_handler: &Arc<DbHandler>,
+) -> Result<bool, Box<dyn Error + Send + Sync>> {
+    let sender_pubkey = extract_pubkey(event);
+    if db_handler.recipient_has_muted_author(&subscription.subscriber, &sender_pubkey)? {
+        debug!(
+            "Skipping notification for subscription {} because subscriber muted {}",
+            subscription.subscriber, sender_pubkey
+        );
+        return Ok(false);
+    }
+
+    if !subscription.social_graph_filter {
+        return Ok(true);
+    }
+
+    let in_social_graph = db_handler.is_pubkey_in_social_graph(&sender_pubkey)?;
+    if !in_social_graph {
+        debug!(
+            "Skipping notification for subscription {} because {} is outside the social graph",
+            subscription.subscriber, sender_pubkey
+        );
+    }
+    Ok(in_social_graph)
 }
 
 fn get_event_type(event: &Event, db_handler: &Arc<DbHandler>, pubkey: &str) -> String {
@@ -270,6 +305,8 @@ pub async fn handle_incoming_event(
         db_handler.profiles.handle_event(event)?;
     } else if event.kind == Kind::ContactList && settings.use_social_graph {
         db_handler.social_graph.handle_event(event)?;
+    } else if event.kind.as_u16() == 10_000 {
+        db_handler.handle_mute_list_event(event)?;
     }
 
     debug!(
@@ -344,7 +381,7 @@ async fn process_author(
         if should_log_info {
             info!("Processing subscription: {:?}", subscription);
         }
-        if subscription.matches_event(event) {
+        if subscription.matches_event(event) && subscription_allows_event(&subscription, event, db_handler)? {
             let event_clone = event.clone();
             let settings_clone = settings.clone();
             let db_handler_clone = db_handler.clone();
@@ -399,7 +436,7 @@ async fn process_p_tag(
 
     for (subscription_id, subscription) in subscriptions {
         debug!("Processing subscription: {:?}", subscription);
-        if subscription.matches_event(event) {
+        if subscription.matches_event(event) && subscription_allows_event(&subscription, event, db_handler)? {
             let event_clone = event.clone();
             let settings_clone = settings.clone();
             let db_handler_clone = db_handler.clone();
@@ -432,6 +469,7 @@ pub async fn send_notifications(
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut tasks = Vec::new();
     let payload = create_notification_payload(&event, &settings, &db_handler).await;
+    let now = current_unix_timestamp();
 
     for webhook_url in subscription.webhooks.clone() {
         let payload = payload.clone();
@@ -443,6 +481,16 @@ pub async fn send_notifications(
     }
 
     for push_sub in subscription.web_push_subscriptions.clone() {
+        let target_key = format!("web_push:{}", push_sub.endpoint);
+        if !db_handler.should_send_push_target(
+            &target_key,
+            now,
+            settings.push_min_interval_seconds,
+        )? {
+            debug!("Skipping web push target during cooldown: {}", push_sub.endpoint);
+            continue;
+        }
+
         let payload = payload.clone();
         let settings = settings.clone();
         tasks.push(tokio::spawn(async move {
@@ -457,6 +505,16 @@ pub async fn send_notifications(
     }
 
     for fcm_token in subscription.fcm_tokens.clone() {
+        let target_key = format!("fcm:{fcm_token}");
+        if !db_handler.should_send_push_target(
+            &target_key,
+            now,
+            settings.push_min_interval_seconds,
+        )? {
+            debug!("Skipping FCM target during cooldown");
+            continue;
+        }
+
         let payload = payload.clone();
         let settings = settings.clone();
         tasks.push(tokio::spawn(async move {
@@ -471,6 +529,16 @@ pub async fn send_notifications(
     }
 
     for apns_token in subscription.apns_tokens.clone() {
+        let target_key = format!("apns:{apns_token}");
+        if !db_handler.should_send_push_target(
+            &target_key,
+            now,
+            settings.push_min_interval_seconds,
+        )? {
+            debug!("Skipping APNS target during cooldown");
+            continue;
+        }
+
         let payload = payload.clone();
         let settings = settings.clone();
         tasks.push(tokio::spawn(async move {
@@ -501,7 +569,10 @@ pub async fn send_notifications(
                 }
             }
             Err(error) => {
-                error!("Notification delivery task failed: {}", error);
+                error!(
+                    "Notification delivery task failed: {}",
+                    describe_error_chain(error.as_ref())
+                );
             }
         }
     }
@@ -541,4 +612,14 @@ struct NotificationTargetRemoval {
     web_push_endpoint: Option<String>,
     fcm_token: Option<String>,
     apns_token: Option<String>,
+}
+
+fn describe_error_chain(error: &dyn Error) -> String {
+    let mut parts = vec![error.to_string()];
+    let mut source = error.source();
+    while let Some(next) = source {
+        parts.push(next.to_string());
+        source = next.source();
+    }
+    parts.join(": ")
 }

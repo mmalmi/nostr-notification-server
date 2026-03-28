@@ -9,10 +9,14 @@ services:
     volumes:
       - ./db:/app/db
       - ./config:/app/config
+      # Mount a read-only social graph snapshot produced by nostr-social-graph-rust.
+      # - ../nostr-social-graph-rust-data/socialGraph.heed:/app/social-graph:ro
     environment:
       - RUST_LOG=debug
       - NNS_HTTP_PORT=3030
       - NNS_HOSTNAME=localhost
+      # - NNS_SOCIAL_GRAPH_SNAPSHOT_PATH=/app/social-graph
+      # - NNS_PUSH_MIN_INTERVAL_SECONDS=30
       # Optional: Override other settings
       # - NNS_DB_MAP_SIZE=1073741824
       # - NNS_RELAYS=wss://relay.damus.io,wss://nos.lol

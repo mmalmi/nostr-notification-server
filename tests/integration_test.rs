@@ -776,12 +776,27 @@ async fn test_mobile_push_delivery(
     let apns = &apns_requests[0];
     assert_eq!(apns["token"].as_str().unwrap(), apns_token);
     assert_eq!(apns["headers"]["apns-topic"].as_str().unwrap(), "to.iris");
-    assert_eq!(apns["headers"]["apns-push-type"].as_str().unwrap(), "alert");
+    assert_eq!(
+        apns["headers"]["apns-push-type"].as_str().unwrap(),
+        "background"
+    );
     assert_eq!(
         apns["body"]["event"]["id"].as_str().unwrap(),
         event.id.to_hex()
     );
     assert_eq!(apns["body"]["event"]["kind"].as_u64().unwrap(), 1060);
+    assert_eq!(
+        apns["body"]["event"]["pubkey"].as_str().unwrap(),
+        event.pubkey.to_hex()
+    );
+    assert_eq!(
+        apns["body"]["event"]["content"].as_str().unwrap(),
+        "ciphertext"
+    );
+    assert_eq!(
+        apns["body"]["aps"]["content-available"].as_u64().unwrap(),
+        1
+    );
 }
 
 async fn test_seen_events_persistence(
@@ -896,6 +911,310 @@ async fn test_seen_events_persistence(
     println!("✅ No duplicate notifications before restart (blocked by persistence)");
 }
 
+async fn test_social_graph_filtered_notifications(
+    client: &Client,
+    push_port: u16,
+    webhook_port: u16,
+    received_pushes: Arc<Mutex<Vec<serde_json::Value>>>,
+    received_webhooks: Arc<Mutex<Vec<serde_json::Value>>>,
+) {
+    received_pushes.lock().await.clear();
+    received_webhooks.lock().await.clear();
+
+    let (root_keys, _) = get_test_keys_pair(11);
+    let (subscriber_keys, allowed_author_keys) = get_test_keys_pair(12);
+    let (_, muted_author_keys) = get_test_keys_pair(13);
+    let (_, spam_author_keys) = get_test_keys_pair(14);
+    let subscriber_pubkey = subscriber_keys.public_key().to_string();
+
+    let browser_keys = generate_browser_keys();
+    let push_subscription = create_push_subscription(
+        &browser_keys,
+        &format!("http://127.0.0.1:{}/push", push_port),
+    );
+
+    let new_subscription = serde_json::json!({
+        "webhooks": [format!("http://127.0.0.1:{}/webhook", webhook_port)],
+        "web_push_subscriptions": [push_subscription],
+        "social_graph_filter": true,
+        "filter": {
+            "#p": [subscriber_pubkey.clone()],
+            "kinds": [1]
+        }
+    });
+
+    let response = make_authed_request_with_keys(
+        client,
+        Method::POST,
+        "http://127.0.0.1:3030/subscriptions",
+        Some(new_subscription),
+        &subscriber_keys,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let contact_list_event = UnsignedEvent::new(
+        root_keys.public_key(),
+        Timestamp::now(),
+        Kind::ContactList,
+        vec![Tag::public_key(allowed_author_keys.public_key())],
+        String::new(),
+    )
+    .sign(&root_keys)
+    .expect("Failed to sign contact list event");
+
+    let response = client
+        .post("http://127.0.0.1:3030/events")
+        .json(&contact_list_event)
+        .send()
+        .await
+        .expect("Failed to send contact list event");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let mute_list_event = UnsignedEvent::new(
+        subscriber_keys.public_key(),
+        Timestamp::now(),
+        Kind::from(10_000),
+        vec![Tag::public_key(muted_author_keys.public_key())],
+        String::new(),
+    )
+    .sign(&subscriber_keys)
+    .expect("Failed to sign mute list event");
+
+    let response = client
+        .post("http://127.0.0.1:3030/events")
+        .json(&mute_list_event)
+        .send()
+        .await
+        .expect("Failed to send mute list event");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    sleep(Duration::from_millis(150)).await;
+
+    let spam_event = create_test_event(&spam_author_keys, &subscriber_pubkey);
+    let response = client
+        .post("http://127.0.0.1:3030/events")
+        .json(&spam_event)
+        .send()
+        .await
+        .expect("Failed to send spam event");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    sleep(Duration::from_millis(150)).await;
+    assert_eq!(
+        received_pushes.lock().await.len(),
+        0,
+        "Out-of-graph author should not trigger push notification"
+    );
+    assert_eq!(
+        received_webhooks.lock().await.len(),
+        0,
+        "Out-of-graph author should not trigger webhook notification"
+    );
+
+    received_pushes.lock().await.clear();
+    received_webhooks.lock().await.clear();
+
+    let muted_event = create_test_event(&muted_author_keys, &subscriber_pubkey);
+    let response = client
+        .post("http://127.0.0.1:3030/events")
+        .json(&muted_event)
+        .send()
+        .await
+        .expect("Failed to send muted author event");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    sleep(Duration::from_millis(150)).await;
+    assert_eq!(
+        received_pushes.lock().await.len(),
+        0,
+        "Muted author should not trigger push notification"
+    );
+    assert_eq!(
+        received_webhooks.lock().await.len(),
+        0,
+        "Muted author should not trigger webhook notification"
+    );
+
+    received_pushes.lock().await.clear();
+    received_webhooks.lock().await.clear();
+
+    let allowed_event = create_test_event(&allowed_author_keys, &subscriber_pubkey);
+    let response = client
+        .post("http://127.0.0.1:3030/events")
+        .json(&allowed_event)
+        .send()
+        .await
+        .expect("Failed to send allowed author event");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    sleep(Duration::from_millis(150)).await;
+    assert_eq!(
+        received_pushes.lock().await.len(),
+        1,
+        "In-graph author should trigger push notification"
+    );
+    assert_eq!(
+        received_webhooks.lock().await.len(),
+        1,
+        "In-graph author should trigger webhook notification"
+    );
+}
+
+async fn test_muted_authors_are_blocked_without_social_graph_filter(
+    client: &Client,
+    push_port: u16,
+    webhook_port: u16,
+    received_pushes: Arc<Mutex<Vec<serde_json::Value>>>,
+    received_webhooks: Arc<Mutex<Vec<serde_json::Value>>>,
+) {
+    received_pushes.lock().await.clear();
+    received_webhooks.lock().await.clear();
+
+    let (subscriber_keys, muted_author_keys) = get_test_keys_pair(17);
+    let subscriber_pubkey = subscriber_keys.public_key().to_string();
+
+    let browser_keys = generate_browser_keys();
+    let push_subscription = create_push_subscription(
+        &browser_keys,
+        &format!("http://127.0.0.1:{}/push", push_port),
+    );
+
+    let new_subscription = serde_json::json!({
+        "webhooks": [format!("http://127.0.0.1:{}/webhook", webhook_port)],
+        "web_push_subscriptions": [push_subscription],
+        "social_graph_filter": false,
+        "filter": {
+            "#p": [subscriber_pubkey.clone()],
+            "kinds": [1]
+        }
+    });
+
+    let response = make_authed_request_with_keys(
+        client,
+        Method::POST,
+        "http://127.0.0.1:3030/subscriptions",
+        Some(new_subscription),
+        &subscriber_keys,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let mute_list_event = UnsignedEvent::new(
+        subscriber_keys.public_key(),
+        Timestamp::now(),
+        Kind::from(10_000),
+        vec![Tag::public_key(muted_author_keys.public_key())],
+        String::new(),
+    )
+    .sign(&subscriber_keys)
+    .expect("Failed to sign mute list event");
+
+    let response = client
+        .post("http://127.0.0.1:3030/events")
+        .json(&mute_list_event)
+        .send()
+        .await
+        .expect("Failed to send mute list event");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    sleep(Duration::from_millis(150)).await;
+
+    let muted_event = create_test_event(&muted_author_keys, &subscriber_pubkey);
+    let response = client
+        .post("http://127.0.0.1:3030/events")
+        .json(&muted_event)
+        .send()
+        .await
+        .expect("Failed to send muted author event");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    sleep(Duration::from_millis(150)).await;
+    assert_eq!(
+        received_pushes.lock().await.len(),
+        0,
+        "Muted author should not trigger push notification when social graph filtering is disabled"
+    );
+    assert_eq!(
+        received_webhooks.lock().await.len(),
+        0,
+        "Muted author should not trigger webhook notification when social graph filtering is disabled"
+    );
+}
+
+async fn test_push_cooldown_only_throttles_push_targets(
+    client: &Client,
+    push_port: u16,
+    webhook_port: u16,
+    received_pushes: Arc<Mutex<Vec<serde_json::Value>>>,
+    received_webhooks: Arc<Mutex<Vec<serde_json::Value>>>,
+) {
+    received_pushes.lock().await.clear();
+    received_webhooks.lock().await.clear();
+
+    let (subscriber_keys, first_author_keys) = get_test_keys_pair(15);
+    let (_, second_author_keys) = get_test_keys_pair(16);
+    let subscriber_pubkey = subscriber_keys.public_key().to_string();
+
+    let browser_keys = generate_browser_keys();
+    let push_subscription = create_push_subscription(
+        &browser_keys,
+        &format!("http://127.0.0.1:{}/push", push_port),
+    );
+
+    let new_subscription = serde_json::json!({
+        "webhooks": [format!("http://127.0.0.1:{}/webhook", webhook_port)],
+        "web_push_subscriptions": [push_subscription],
+        "filter": {
+            "#p": [subscriber_pubkey.clone()],
+            "kinds": [1]
+        }
+    });
+
+    let response = make_authed_request_with_keys(
+        client,
+        Method::POST,
+        "http://127.0.0.1:3030/subscriptions",
+        Some(new_subscription),
+        &subscriber_keys,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let first_event = create_test_event(&first_author_keys, &subscriber_pubkey);
+    let response = client
+        .post("http://127.0.0.1:3030/events")
+        .json(&first_event)
+        .send()
+        .await
+        .expect("Failed to send first cooldown test event");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    sleep(Duration::from_millis(150)).await;
+
+    let second_event = create_test_event(&second_author_keys, &subscriber_pubkey);
+    let response = client
+        .post("http://127.0.0.1:3030/events")
+        .json(&second_event)
+        .send()
+        .await
+        .expect("Failed to send second cooldown test event");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    sleep(Duration::from_millis(150)).await;
+
+    assert_eq!(
+        received_pushes.lock().await.len(),
+        1,
+        "Push delivery should be throttled during cooldown"
+    );
+    assert_eq!(
+        received_webhooks.lock().await.len(),
+        2,
+        "Webhook delivery should remain unthrottled"
+    );
+}
+
 #[tokio::test]
 async fn test_integration() {
     let client = Client::new();
@@ -969,13 +1288,71 @@ async fn test_integration() {
         &client,
         push_port,
         webhook_port,
+        received_pushes.clone(),
+        received_webhooks.clone(),
+    )
+    .await;
+    test_auth_failures(&client, push_port, webhook_port).await;
+    test_muted_authors_are_blocked_without_social_graph_filter(
+        &client,
+        push_port,
+        webhook_port,
+        received_pushes.clone(),
+        received_webhooks.clone(),
+    )
+    .await;
+
+    // Send SIGTERM to the child process
+    child
+        .kill()
+        .await
+        .expect("Failed to send signal to process");
+    child
+        .wait()
+        .await
+        .expect("Failed to wait for process to exit");
+
+    let (graph_root_keys, _) = get_test_keys_pair(11);
+
+    let mut child = start_server_with_extra_env(vec![(
+        "NNS_SOCIAL_GRAPH_ROOT_PUBKEY".to_string(),
+        graph_root_keys.public_key().to_string(),
+    )])
+    .await;
+
+    test_social_graph_filtered_notifications(
+        &client,
+        push_port,
+        webhook_port,
+        received_pushes.clone(),
+        received_webhooks.clone(),
+    )
+    .await;
+
+    child
+        .kill()
+        .await
+        .expect("Failed to send signal to process");
+    child
+        .wait()
+        .await
+        .expect("Failed to wait for process to exit");
+
+    let mut child = start_server_with_extra_env(vec![(
+        "NNS_PUSH_MIN_INTERVAL_SECONDS".to_string(),
+        "60".to_string(),
+    )])
+    .await;
+
+    test_push_cooldown_only_throttles_push_targets(
+        &client,
+        push_port,
+        webhook_port,
         received_pushes,
         received_webhooks,
     )
     .await;
-    test_auth_failures(&client, push_port, webhook_port).await;
 
-    // Send SIGTERM to the child process
     child
         .kill()
         .await

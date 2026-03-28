@@ -14,4 +14,7 @@ icon_url = "https://iris.to/img/android-chrome-192x192.png"
 notification_base_url = "https://iris.to"
 social_graph_root_pubkey = "npub1g53mukxnjkcmr94fhryzkqutdz2ukq4ks0gvy5af25rgmwsl4ngq43drvk"
 use_social_graph = true
+# Optional read-only mount of the crawled graph LMDB directory, e.g. /app/social-graph
+# social_graph_snapshot_path = "/app/social-graph"
 max_p_tags = 10  # skip p-tag notifications for events with more p tags than this (0 = disabled)
+push_min_interval_seconds = 0  # throttle web push / mobile push per target (webhooks stay unthrottled)

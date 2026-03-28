@@ -22,10 +22,14 @@ pub struct Settings {
     pub social_graph_root_pubkey: String,
     #[serde(default = "default_use_social_graph")]
     pub use_social_graph: bool,
+    #[serde(default)]
+    pub social_graph_snapshot_path: Option<String>,
     #[serde(default = "default_max_seen_events")]
     pub max_seen_events: usize,
     #[serde(default = "default_max_p_tags")]
     pub max_p_tags: usize,
+    #[serde(default = "default_push_min_interval_seconds")]
+    pub push_min_interval_seconds: u64,
     #[serde(default)]
     pub fcm_service_account_key: Option<String>,
     #[serde(default = "default_fcm_api_base_url")]
@@ -64,6 +68,10 @@ fn default_max_p_tags() -> usize {
     10
 }
 
+fn default_push_min_interval_seconds() -> u64 {
+    0
+}
+
 fn default_fcm_api_base_url() -> String {
     "https://fcm.googleapis.com".to_string()
 }
@@ -98,6 +106,7 @@ impl Settings {
         s = s.set_default("use_social_graph", true)?;
         s = s.set_default("max_seen_events", 1_000_000)?;
         s = s.set_default("max_p_tags", 10)?;
+        s = s.set_default("push_min_interval_seconds", 0)?;
         s = s.set_default("fcm_api_base_url", "https://fcm.googleapis.com")?;
         s = s.set_default("apns_environment", "production")?;
         s = s.set_default("apns_api_base_url", "")?;

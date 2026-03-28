@@ -17,6 +17,8 @@ pub struct Subscription {
     pub fcm_tokens: Vec<String>,
     #[serde(default)]
     pub apns_tokens: Vec<String>,
+    #[serde(default)]
+    pub social_graph_filter: bool,
     pub filter: SubscriptionFilter,
     #[serde(default)]
     pub subscriber: String,
@@ -93,6 +95,7 @@ impl Subscription {
             web_push_subscriptions,
             fcm_tokens: Vec::new(),
             apns_tokens: Vec::new(),
+            social_graph_filter: false,
             filter,
             subscriber: fbs.subscriber().unwrap_or_default().to_string(),
         })

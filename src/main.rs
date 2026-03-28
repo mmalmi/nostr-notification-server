@@ -2,6 +2,7 @@ pub mod auth;
 mod config;
 mod db;
 pub mod errors;
+mod external_social_graph;
 mod filter;
 mod http_server;
 pub mod mobile_push;
