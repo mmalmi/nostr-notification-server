@@ -21,12 +21,13 @@ pub async fn verify_nostr_auth(
 
         let event_json = String::from_utf8(event_str)
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
-        
+
         let event: Event = serde_json::from_slice(&event_json.as_bytes())
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
 
         // Verify event signature
-        event.verify()
+        event
+            .verify()
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
 
         // Verify kind is 27235 (authorization event)
@@ -39,7 +40,7 @@ pub async fn verify_nostr_auth(
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?
             .as_secs() as u64;
-        
+
         let event_time = event.created_at.as_u64();
         if event_time > current_time + 600 {
             return Err("Auth event timestamp too far in future".into());
@@ -47,21 +48,23 @@ pub async fn verify_nostr_auth(
         if event_time < current_time - 600 {
             return Err("Auth event timestamp too old".into());
         }
-        
-        // Verify URL and method tags
-        let url_tag = event.tags.iter().find(|tag| {
-            matches!(Tag::parse(&["u", url]), Ok(t) if t == **tag)
-        });
 
-        let method_tag = event.tags.iter().find(|tag| {
-            matches!(Tag::parse(&["method", method]), Ok(t) if t == **tag)
-        });
+        // Verify URL and method tags
+        let url_tag = event
+            .tags
+            .iter()
+            .find(|tag| matches!(Tag::parse(&["u", url]), Ok(t) if t == **tag));
+
+        let method_tag = event
+            .tags
+            .iter()
+            .find(|tag| matches!(Tag::parse(&["method", method]), Ok(t) if t == **tag));
 
         match (url_tag, method_tag) {
             (Some(_), Some(_)) => Ok(event.pubkey.to_string()),
-            _ => Err("Missing or invalid URL/method tags".into())
+            _ => Err("Missing or invalid URL/method tags".into()),
         }
     } else {
         Err("Auth header not present".into())
     }
-} 
+}

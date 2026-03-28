@@ -1,9 +1,9 @@
+use log::debug;
+use nostr_sdk::base64::{engine::general_purpose, Engine as _};
+use std::error::Error;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
-use nostr_sdk::base64::{Engine as _, engine::general_purpose};
-use log::debug;
-use std::error::Error;
 
 const PRIVATE_KEY_PATH: &str = "config/vapid_private_key.pem";
 const PUBLIC_KEY_PATH: &str = "config/vapid_public_key.txt";
@@ -16,25 +16,37 @@ pub fn ensure_vapid_keys() -> Result<(String, String), Box<dyn Error>> {
 
     let private_key = fs::read_to_string(PRIVATE_KEY_PATH)?;
     let public_key = fs::read_to_string(PUBLIC_KEY_PATH)?;
-    
+
     Ok((private_key, public_key.trim().to_string()))
 }
 
 fn generate_vapid_keys() -> Result<(), Box<dyn std::error::Error>> {
     debug!("Generating private key with OpenSSL");
-    
+
     // Generate private key directly in PEM format
     Command::new("openssl")
-        .args(&["ecparam", "-genkey", "-name", "prime256v1", "-out", PRIVATE_KEY_PATH])
+        .args(&[
+            "ecparam",
+            "-genkey",
+            "-name",
+            "prime256v1",
+            "-out",
+            PRIVATE_KEY_PATH,
+        ])
         .output()?;
 
     // Extract the raw public key bytes
     let public_key_output = Command::new("openssl")
-        .args(&["ec", 
-               "-in", PRIVATE_KEY_PATH,
-               "-pubout", 
-               "-outform", "DER",
-               "-conv_form", "uncompressed"])
+        .args(&[
+            "ec",
+            "-in",
+            PRIVATE_KEY_PATH,
+            "-pubout",
+            "-outform",
+            "DER",
+            "-conv_form",
+            "uncompressed",
+        ])
         .output()?;
 
     if !public_key_output.status.success() {

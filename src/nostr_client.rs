@@ -1,8 +1,8 @@
-use std::sync::Arc;
+use log::{debug, error, info, warn};
+use nostr_sdk::{Client, Event, Filter, Keys, Kind, RelayPoolNotification, Timestamp};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use log::{error, info, debug, warn};
-use nostr_sdk::{Client, Filter, Keys, RelayPoolNotification, Timestamp, Event, Kind};
 use tokio::time::timeout;
 
 use crate::config::Settings;
@@ -18,21 +18,23 @@ pub async fn run_nostr_client(
 
     // Add startup timestamp
     let startup_time = std::time::SystemTime::now();
-    
+
     // Load last event time from database
-    let last_event_time = db_handler.get_last_event_time()
-        .unwrap_or_else(|e| {
-            error!("Failed to load last event time: {}", e);
-            None
-        });
-    
+    let last_event_time = db_handler.get_last_event_time().unwrap_or_else(|e| {
+        error!("Failed to load last event time: {}", e);
+        None
+    });
+
     if let Some(timestamp) = last_event_time {
-        info!("Loaded last event time: {} ({})", timestamp, 
-            Timestamp::from(timestamp));
+        info!(
+            "Loaded last event time: {} ({})",
+            timestamp,
+            Timestamp::from(timestamp)
+        );
     } else {
         info!("No previous last event time found, starting fresh");
     }
-    
+
     // Generate new random keys
     let my_keys = Keys::generate();
     info!("Generated new keys");
@@ -59,13 +61,13 @@ pub async fn run_nostr_client(
     } else {
         Timestamp::now()
     };
-    
+
     let two_days_ago = Timestamp::now() - 172800; // 2 days = 172800 seconds
     let filters = vec![
         Filter::new().since(since_timestamp), // everything from last event time or now
         Filter::new().kind(Kind::Custom(1059)).since(two_days_ago), // gift wraps - kind 1059 from past 2 days
     ];
-    
+
     info!("Subscribing to events since: {}", since_timestamp);
 
     // Subscribe to events
@@ -77,7 +79,7 @@ pub async fn run_nostr_client(
     // Log seen events count on startup
     match db_handler.get_seen_events_count() {
         Ok(count) => info!("Loaded {} seen events from database", count),
-        Err(e) => error!("Failed to get seen events count: {}", e)
+        Err(e) => error!("Failed to get seen events count: {}", e),
     }
 
     // Handle incoming events
@@ -87,13 +89,14 @@ pub async fn run_nostr_client(
         }
 
         if let RelayPoolNotification::Event { event, .. } = notification {
-
             // Validate event timestamp matches our filter
             // For gift wraps, check against two_days_ago; for others, check against since_timestamp
             if event.kind == Kind::Custom(1059) {
                 if event.created_at < two_days_ago {
-                    debug!("Skipping gift wrap event older than filter: {} < {}", 
-                        event.created_at, two_days_ago);
+                    debug!(
+                        "Skipping gift wrap event older than filter: {} < {}",
+                        event.created_at, two_days_ago
+                    );
                     continue;
                 }
                 // Skip gift wrap events in the first minutes
@@ -109,8 +112,10 @@ pub async fn run_nostr_client(
             } else {
                 // For non-gift-wrap events, check against since_timestamp
                 if event.created_at < since_timestamp {
-                    debug!("Skipping event older than filter: {} < {}", 
-                        event.created_at, since_timestamp);
+                    debug!(
+                        "Skipping event older than filter: {} < {}",
+                        event.created_at, since_timestamp
+                    );
                     continue;
                 }
             }
@@ -120,7 +125,7 @@ pub async fn run_nostr_client(
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
-            
+
             if let Err(e) = db_handler.save_last_event_time(current_time) {
                 error!("Failed to save last event time: {}", e);
             }

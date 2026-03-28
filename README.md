@@ -1,5 +1,7 @@
 # Nostr Notification Server
 
+> Main development is on [decentralized git](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/nostr-notification-server): `htree://npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/nostr-notification-server`
+
 A server that sends web push notifications and calls webhooks when Nostr events match user-defined filters.
 
 Built on Rust, Heed (LMDB) and Flatbuffers.

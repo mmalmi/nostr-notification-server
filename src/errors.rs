@@ -1,9 +1,9 @@
+use log;
 use regex::Regex;
 use std::fmt;
 use warp::http::StatusCode;
 use warp::reject;
 use warp::Rejection;
-use log;
 
 #[derive(Debug)]
 pub struct CustomRejection {
@@ -19,7 +19,9 @@ impl fmt::Display for CustomRejection {
     }
 }
 
-pub async fn handle_rejection(err: Rejection) -> Result<impl warp::Reply, std::convert::Infallible> {
+pub async fn handle_rejection(
+    err: Rejection,
+) -> Result<impl warp::Reply, std::convert::Infallible> {
     let (code, body) = if err.find::<CustomRejection>().is_some() {
         let e = err.find::<CustomRejection>().unwrap();
         log::info!("Custom rejection: {} - {}", e.error_type, e.message);
@@ -29,15 +31,15 @@ pub async fn handle_rejection(err: Rejection) -> Result<impl warp::Reply, std::c
                 serde_json::json!({
                     "error": "UNAUTHORIZED",
                     "message": e.message
-                })
+                }),
             ),
             _ => (
                 StatusCode::BAD_REQUEST,
                 serde_json::json!({
                     "error": e.error_type,
                     "message": e.message
-                })
-            )
+                }),
+            ),
         }
     } else if err.find::<warp::reject::MissingHeader>().is_some() {
         log::info!("Missing header error");
@@ -46,7 +48,7 @@ pub async fn handle_rejection(err: Rejection) -> Result<impl warp::Reply, std::c
             serde_json::json!({
                 "error": "UNAUTHORIZED",
                 "message": "Missing authorization header"
-            })
+            }),
         )
     } else if err.is_not_found() || err.find::<warp::reject::MethodNotAllowed>().is_some() {
         log::info!("Not Found error");
@@ -55,7 +57,7 @@ pub async fn handle_rejection(err: Rejection) -> Result<impl warp::Reply, std::c
             serde_json::json!({
                 "error": "NOT_FOUND",
                 "message": "Resource not found"
-            })
+            }),
         )
     } else if err.find::<warp::body::BodyDeserializeError>().is_some() {
         log::info!("Body deserialization error");
@@ -64,7 +66,7 @@ pub async fn handle_rejection(err: Rejection) -> Result<impl warp::Reply, std::c
             serde_json::json!({
                 "error": "INVALID_BODY",
                 "message": "Invalid request body"
-            })
+            }),
         )
     } else {
         log::error!("Unhandled rejection: {:?}", err);
@@ -73,16 +75,13 @@ pub async fn handle_rejection(err: Rejection) -> Result<impl warp::Reply, std::c
             serde_json::json!({
                 "error": "INTERNAL_SERVER_ERROR",
                 "message": "Internal server error"
-            })
+            }),
         )
     };
 
     log::info!("Sending error response: {} - {}", code.as_u16(), body);
-    
-    Ok(warp::reply::with_status(
-        warp::reply::json(&body),
-        code
-    ))
+
+    Ok(warp::reply::with_status(warp::reply::json(&body), code))
 }
 
 pub fn clean_error_message(message: &str) -> String {
@@ -96,4 +95,4 @@ pub fn clean_error_message(message: &str) -> String {
     } else {
         "Invalid request body".to_string()
     }
-} 
+}
