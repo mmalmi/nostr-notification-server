@@ -1,5 +1,6 @@
 use std::error::Error;
 use std::fs;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -10,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::config::Settings;
-use crate::notifications::NotificationPayload;
+use crate::notifications::{EventPayload, NotificationPayload};
 
 #[derive(Debug, Deserialize)]
 struct FcmServiceAccount {
@@ -132,36 +133,42 @@ pub async fn send_apns_push(
         &EncodingKey::from_ec_pem(auth_key_pem.as_bytes())?,
     )?;
 
-    let aps_body = if payload.body.is_empty() {
-        json!({ "title": payload.title })
-    } else {
-        json!({ "title": payload.title, "body": payload.body })
-    };
-    let request_body = json!({
-        "aps": {
-            "alert": aps_body,
-            "sound": "default",
-            "mutable-content": 1
-        },
-        "event": payload.event,
-        "title": payload.title,
-        "body": payload.body,
-        "icon": payload.icon,
-        "url": payload.url
-    });
+    let request_body = build_apns_request_body(payload);
+    let request_body_bytes = serde_json::to_vec(&request_body)?;
+    let payload_size = request_body_bytes.len();
 
     let base_url = resolve_apns_api_base_url(settings);
+    let parsed_base_url = reqwest::Url::parse(&base_url)?;
     let endpoint = format!("{}/3/device/{}", base_url.trim_end_matches('/'), token);
-    debug!("Sending APNS push for token {}", abbreviate_token(token));
-    let response = reqwest::Client::new()
-        .post(endpoint)
+    let host = parsed_base_url
+        .host_str()
+        .ok_or("APNS base URL is missing a host")?
+        .to_string();
+    let client = build_apns_client(&host, parsed_base_url.scheme() == "https")?;
+
+    debug!(
+        "Sending APNS push for token {} with payload_bytes={}",
+        abbreviate_token(token),
+        payload_size
+    );
+    let request = client
+        .post(&endpoint)
         .header("authorization", format!("bearer {}", jwt))
         .header("apns-topic", topic)
-        .header("apns-push-type", "alert")
-        .header("apns-priority", "10")
-        .json(&request_body)
-        .send()
-        .await?;
+        .header("apns-push-type", "background")
+        .header("apns-priority", "5")
+        .header("content-type", "application/json")
+        .body(request_body_bytes);
+    let response = request.send().await.map_err(|error| {
+        format!(
+            "APNS request failed for token {} (payload_bytes={}, connect={}, timeout={}): {}",
+            abbreviate_token(token),
+            payload_size,
+            error.is_connect(),
+            error.is_timeout(),
+            describe_error_chain(&error),
+        )
+    })?;
     let status = response.status();
     let body = response.text().await.unwrap_or_default();
 
@@ -171,12 +178,85 @@ pub async fn send_apns_push(
 
     let should_remove = should_remove_apns_token(status, &body);
     warn!(
-        "APNS push failed for token {} with status {}: {}",
+        "APNS push failed for token {} with status {} (payload_bytes={}): {}",
         abbreviate_token(token),
         status,
+        payload_size,
         body
     );
     Ok(should_remove)
+}
+
+fn build_apns_request_body(payload: &NotificationPayload) -> serde_json::Value {
+    json!({
+        "aps": {
+            "content-available": 1
+        },
+        "event": compact_event_payload_for_apns(&payload.event),
+        "title": payload.title,
+        "body": payload.body,
+        "icon": payload.icon,
+        "url": payload.url
+    })
+}
+
+fn compact_event_payload_for_apns(event: &EventPayload) -> serde_json::Value {
+    match event {
+        EventPayload::Full(event) => json!({
+            "id": event.id.to_hex(),
+            "pubkey": event.pubkey.to_hex(),
+            "created_at": event.created_at.as_u64(),
+            "kind": event.kind.as_u16(),
+            "tags": event
+                .tags
+                .iter()
+                .filter(|tag| tag.as_slice().first().map_or(false, |value| value == "header"))
+                .map(|tag| tag.clone().to_vec())
+                .collect::<Vec<Vec<String>>>(),
+            "content": event.content,
+            "sig": event.sig.to_string(),
+        }),
+        EventPayload::Details(details) => json!({
+            "id": details.id,
+            "pubkey": details.author,
+            "kind": details.kind,
+        }),
+    }
+}
+
+fn build_apns_client(
+    host: &str,
+    require_http2: bool,
+) -> Result<reqwest::Client, Box<dyn Error + Send + Sync>> {
+    let socket_addrs = resolve_ipv4_socket_addrs(host, 443)?;
+    let mut builder = reqwest::Client::builder();
+    if !socket_addrs.is_empty() && host.parse::<std::net::IpAddr>().is_err() {
+        builder = builder.resolve_to_addrs(host, &socket_addrs);
+    }
+    if require_http2 {
+        builder = builder.http2_prior_knowledge();
+    }
+    Ok(builder.build()?)
+}
+
+fn resolve_ipv4_socket_addrs(
+    host: &str,
+    port: u16,
+) -> Result<Vec<SocketAddr>, Box<dyn Error + Send + Sync>> {
+    Ok((host, port)
+        .to_socket_addrs()?
+        .filter(|addr| addr.is_ipv4())
+        .collect())
+}
+
+fn describe_error_chain(error: &dyn Error) -> String {
+    let mut parts = vec![error.to_string()];
+    let mut source = error.source();
+    while let Some(next) = source {
+        parts.push(next.to_string());
+        source = next.source();
+    }
+    parts.join(": ")
 }
 
 fn load_fcm_service_account(
@@ -293,4 +373,61 @@ fn abbreviate_token(token: &str) -> String {
         return token.to_string();
     }
     format!("{}...{}", &token[..8], &token[token.len() - 4..])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_apns_request_body, compact_event_payload_for_apns};
+    use crate::notifications::{EventPayload, NotificationPayload};
+    use nostr_sdk::nostr::Event;
+    use nostr_sdk::JsonUtil;
+    use serde_json::json;
+
+    fn sample_event_payload() -> EventPayload {
+        EventPayload::Full(
+            Event::from_json(
+                r#"{"id":"4b68ab3847feda7d6c62c1fbcbeebfa35eab7351ed5e78f4ddadea5df64b8015","pubkey":"f86c3c5d6a6924e0f1ff8d3cf6fcb09f5dcba238c2f1a68d0f4638b1cc403b4a","created_at":1700000000,"kind":1060,"tags":[],"content":"hello","sig":"4d7c79de55b59de3f3eb89e7dfc30ec443b13ac0b8e75cfd40c1d0acf7d500d7657ef0627c054b022cb35c50a6481d948e57843b4374c1c1ff717a8ba4a89822"}"#,
+            )
+            .expect("sample event should parse"),
+        )
+    }
+
+    #[test]
+    fn compact_event_payload_keeps_decryptable_fields_for_apns() {
+        let compacted = compact_event_payload_for_apns(&sample_event_payload());
+
+        assert_eq!(
+            compacted["id"].as_str().unwrap(),
+            "4b68ab3847feda7d6c62c1fbcbeebfa35eab7351ed5e78f4ddadea5df64b8015"
+        );
+        assert_eq!(
+            compacted["pubkey"].as_str().unwrap(),
+            "f86c3c5d6a6924e0f1ff8d3cf6fcb09f5dcba238c2f1a68d0f4638b1cc403b4a"
+        );
+        assert_eq!(compacted["kind"].as_u64().unwrap(), 1060);
+        assert_eq!(compacted["content"].as_str().unwrap(), "hello");
+        assert_eq!(compacted["tags"], json!([]));
+        assert!(compacted["sig"].as_str().unwrap().len() >= 128);
+    }
+
+    #[test]
+    fn build_apns_request_body_uses_background_push_payload() {
+        let payload = NotificationPayload {
+            event: sample_event_payload(),
+            title: "DM by Someone".to_string(),
+            body: "New message".to_string(),
+            icon: "https://example.com/icon.png".to_string(),
+            url: "https://example.com/note".to_string(),
+        };
+
+        let request_body = build_apns_request_body(&payload);
+
+        assert_eq!(request_body["aps"], json!({"content-available": 1}));
+        assert_eq!(
+            request_body["event"]["id"].as_str().unwrap(),
+            "4b68ab3847feda7d6c62c1fbcbeebfa35eab7351ed5e78f4ddadea5df64b8015"
+        );
+        assert_eq!(request_body["event"]["kind"].as_u64().unwrap(), 1060);
+        assert_eq!(request_body["event"]["content"].as_str().unwrap(), "hello");
+    }
 }
