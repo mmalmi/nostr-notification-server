@@ -5,7 +5,7 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
-use log::{debug, warn};
+use log::{debug, info, warn};
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -173,6 +173,12 @@ pub async fn send_apns_push(
     let body = response.text().await.unwrap_or_default();
 
     if status.is_success() {
+        info!(
+            "APNS push sent for token {} with status {} (payload_bytes={})",
+            abbreviate_token(token),
+            status,
+            payload_size
+        );
         return Ok(false);
     }
 
