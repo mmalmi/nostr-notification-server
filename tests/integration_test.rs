@@ -776,14 +776,8 @@ async fn test_mobile_push_delivery(
     let apns = &apns_requests[0];
     assert_eq!(apns["token"].as_str().unwrap(), apns_token);
     assert_eq!(apns["headers"]["apns-topic"].as_str().unwrap(), "to.iris");
-    assert_eq!(
-        apns["headers"]["apns-push-type"].as_str().unwrap(),
-        "alert"
-    );
-    assert_eq!(
-        apns["headers"]["apns-priority"].as_str().unwrap(),
-        "10"
-    );
+    assert_eq!(apns["headers"]["apns-push-type"].as_str().unwrap(), "alert");
+    assert_eq!(apns["headers"]["apns-priority"].as_str().unwrap(), "10");
     assert_eq!(
         apns["body"]["event"]["id"].as_str().unwrap(),
         event.id.to_hex()
@@ -797,10 +791,7 @@ async fn test_mobile_push_delivery(
         apns["body"]["event"]["content"].as_str().unwrap(),
         "ciphertext"
     );
-    assert_eq!(
-        apns["body"]["aps"]["mutable-content"].as_u64().unwrap(),
-        1
-    );
+    assert_eq!(apns["body"]["aps"]["mutable-content"].as_u64().unwrap(), 1);
     assert_eq!(
         apns["body"]["aps"]["alert"]["title"].as_str().unwrap(),
         "Iris Chat"

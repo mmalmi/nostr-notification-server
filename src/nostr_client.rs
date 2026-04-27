@@ -88,7 +88,24 @@ pub async fn run_nostr_client(
             break;
         }
 
-        if let RelayPoolNotification::Event { event, .. } = notification {
+        if let RelayPoolNotification::Event {
+            relay_url, event, ..
+        } = notification
+        {
+            if event.kind.as_u16() == 1060 || event.kind == Kind::Custom(1059) {
+                let received_at = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                info!(
+                    "Received encrypted notification candidate kind={} id={} relay={} event_age_secs={}",
+                    event.kind,
+                    event.id,
+                    relay_url,
+                    received_at.saturating_sub(event.created_at.as_u64())
+                );
+            }
+
             // Validate event timestamp matches our filter
             // For gift wraps, check against two_days_ago; for others, check against since_timestamp
             if event.kind == Kind::Custom(1059) {
