@@ -792,10 +792,8 @@ async fn test_mobile_push_delivery(
         "ciphertext"
     );
     assert_eq!(apns["body"]["aps"]["mutable-content"].as_u64().unwrap(), 1);
-    assert_eq!(
-        apns["body"]["aps"]["alert"]["title"].as_str().unwrap(),
-        "Iris Chat"
-    );
+    assert_eq!(apns["body"]["aps"]["alert"]["title"].as_str().unwrap(), "");
+    assert_eq!(apns["body"]["aps"]["alert"]["body"].as_str().unwrap(), "");
 }
 
 async fn test_mobile_push_token_moves_between_subscriptions(
