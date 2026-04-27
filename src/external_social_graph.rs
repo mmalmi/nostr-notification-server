@@ -9,7 +9,7 @@ use std::time::Duration;
 
 const DEFAULT_MAP_SIZE: usize = 4 * 1024 * 1024 * 1024;
 const MAX_DBS: u32 = 16;
-const OPEN_RETRY_ATTEMPTS: usize = 12;
+const OPEN_RETRY_ATTEMPTS: usize = 40;
 const OPEN_RETRY_DELAY_MS: u64 = 250;
 
 const STR_TO_UNIQUE_ID_DB: &str = "str_to_unique_id";
@@ -30,8 +30,7 @@ impl ExternalSocialGraph {
             return Err(format!("social graph path does not exist: {}", path.display()).into());
         }
 
-        let env = open_read_only_env_with_retries(path)?;
-        Self::from_env(env)
+        open_read_only_graph_with_retries(path)
     }
 
     fn from_env(env: Env) -> Result<Self, Box<dyn Error + Send + Sync>> {
@@ -90,18 +89,27 @@ impl ExternalSocialGraph {
     }
 }
 
-fn open_read_only_env_with_retries(path: &Path) -> Result<Env, HeedError> {
+fn open_read_only_graph_with_retries(
+    path: &Path,
+) -> Result<ExternalSocialGraph, Box<dyn Error + Send + Sync>> {
     for attempt in 0..=OPEN_RETRY_ATTEMPTS {
-        match open_read_only_env(path) {
-            Ok(env) => return Ok(env),
-            Err(error) if is_temporary_resource_error(&error) && attempt < OPEN_RETRY_ATTEMPTS => {
+        match open_read_only_graph(path) {
+            Ok(graph) => return Ok(graph),
+            Err(error)
+                if is_temporary_resource_error(error.as_ref()) && attempt < OPEN_RETRY_ATTEMPTS =>
+            {
                 thread::sleep(Duration::from_millis(OPEN_RETRY_DELAY_MS));
             }
             Err(error) => return Err(error),
         }
     }
 
-    open_read_only_env(path)
+    open_read_only_graph(path)
+}
+
+fn open_read_only_graph(path: &Path) -> Result<ExternalSocialGraph, Box<dyn Error + Send + Sync>> {
+    let env = open_read_only_env(path)?;
+    ExternalSocialGraph::from_env(env)
 }
 
 fn open_read_only_env(path: &Path) -> Result<Env, HeedError> {
@@ -113,12 +121,25 @@ fn open_read_only_env(path: &Path) -> Result<Env, HeedError> {
     }
 }
 
-fn is_temporary_resource_error(error: &HeedError) -> bool {
-    matches!(
-        error,
-        HeedError::Io(io_error)
-            if io_error.kind() == io::ErrorKind::WouldBlock || io_error.raw_os_error() == Some(11)
-    )
+fn is_temporary_resource_error(error: &(dyn Error + 'static)) -> bool {
+    if let Some(heed_error) = error.downcast_ref::<HeedError>() {
+        if matches!(
+            heed_error,
+            HeedError::Io(io_error)
+                if io_error.kind() == io::ErrorKind::WouldBlock
+                    || io_error.raw_os_error() == Some(11)
+        ) {
+            return true;
+        }
+    }
+
+    if let Some(io_error) = error.downcast_ref::<io::Error>() {
+        if io_error.kind() == io::ErrorKind::WouldBlock || io_error.raw_os_error() == Some(11) {
+            return true;
+        }
+    }
+
+    error.source().is_some_and(is_temporary_resource_error)
 }
 
 fn open_required_database<KC, DC>(
