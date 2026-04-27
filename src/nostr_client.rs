@@ -17,7 +17,11 @@ pub async fn run_nostr_client(
     info!("Starting run_nostr_client");
 
     // Add startup timestamp
-    let startup_time = std::time::SystemTime::now();
+    let startup_time = SystemTime::now();
+    let startup_unix_time = startup_time
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
 
     // Load last event time from database
     let last_event_time = db_handler.get_last_event_time().unwrap_or_else(|e| {
@@ -93,17 +97,18 @@ pub async fn run_nostr_client(
         } = notification
         {
             if event.kind.as_u16() == 1060 || event.kind == Kind::Custom(1059) {
-                let received_at = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-                info!(
-                    "Received encrypted notification candidate kind={} id={} relay={} event_age_secs={}",
-                    event.kind,
-                    event.id,
-                    relay_url,
-                    received_at.saturating_sub(event.created_at.as_u64())
-                );
+                let event_age_secs = event_age_secs(&event);
+                if event.kind.as_u16() == 1060 || event_age_secs <= 30 {
+                    info!(
+                        "Received encrypted notification candidate kind={} id={} relay={} event_age_secs={}",
+                        event.kind, event.id, relay_url, event_age_secs
+                    );
+                } else {
+                    debug!(
+                        "Received replayed gift wrap event kind={} id={} relay={} event_age_secs={}",
+                        event.kind, event.id, relay_url, event_age_secs
+                    );
+                }
             }
 
             // Validate event timestamp matches our filter
@@ -120,7 +125,7 @@ pub async fn run_nostr_client(
                 if let Ok(elapsed) = startup_time.elapsed() {
                     if elapsed < Duration::from_secs(60 * 2) {
                         // Check if event timestamp is before startup time
-                        if event.created_at.as_u64() <= startup_time.elapsed().unwrap().as_secs() {
+                        if event.created_at.as_u64() <= startup_unix_time {
                             debug!("Skipping gift wrap event during startup period");
                             continue;
                         }
@@ -154,6 +159,14 @@ pub async fn run_nostr_client(
     }
 
     Ok(())
+}
+
+fn event_age_secs(event: &Event) -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        .saturating_sub(event.created_at.as_u64())
 }
 
 async fn handle_event(
