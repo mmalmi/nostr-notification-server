@@ -194,12 +194,11 @@ pub async fn send_apns_push(
 }
 
 fn build_apns_request_body(payload: &NotificationPayload) -> serde_json::Value {
-    let (alert_title, alert_body) = apns_fallback_alert(payload);
     json!({
         "aps": {
             "alert": {
-                "title": alert_title,
-                "body": alert_body
+                "title": "Iris Chat",
+                "body": payload.body
             },
             "mutable-content": 1
         },
@@ -209,13 +208,6 @@ fn build_apns_request_body(payload: &NotificationPayload) -> serde_json::Value {
         "icon": payload.icon,
         "url": payload.url
     })
-}
-
-fn apns_fallback_alert(payload: &NotificationPayload) -> (&str, &str) {
-    match &payload.event {
-        EventPayload::Full(event) if event.kind.as_u16() == 1060 => ("", ""),
-        _ => ("Iris Chat", payload.body.as_str()),
-    }
 }
 
 fn compact_event_payload_for_apns(event: &EventPayload) -> serde_json::Value {
@@ -429,7 +421,7 @@ mod tests {
     }
 
     #[test]
-    fn build_apns_request_body_uses_empty_visible_fallback_for_encrypted_messages() {
+    fn build_apns_request_body_uses_visible_mutable_payload() {
         let payload = NotificationPayload {
             event: sample_event_payload(),
             title: "DM by Someone".to_string(),
@@ -444,8 +436,8 @@ mod tests {
             request_body["aps"],
             json!({
                 "alert": {
-                    "title": "",
-                    "body": ""
+                    "title": "Iris Chat",
+                    "body": "New message"
                 },
                 "mutable-content": 1
             })
