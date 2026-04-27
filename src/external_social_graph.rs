@@ -109,6 +109,7 @@ fn open_read_only_graph_with_retries(
 
 fn open_read_only_graph(path: &Path) -> Result<ExternalSocialGraph, Box<dyn Error + Send + Sync>> {
     let env = open_read_only_env(path)?;
+    env.clear_stale_readers()?;
     ExternalSocialGraph::from_env(env)
 }
 
