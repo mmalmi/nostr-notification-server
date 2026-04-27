@@ -803,7 +803,7 @@ async fn test_mobile_push_delivery(
     );
     assert_eq!(
         apns["body"]["aps"]["alert"]["title"].as_str().unwrap(),
-        "DM by Someone"
+        "Iris Chat"
     );
 }
 

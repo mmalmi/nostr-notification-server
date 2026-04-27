@@ -197,7 +197,7 @@ fn build_apns_request_body(payload: &NotificationPayload) -> serde_json::Value {
     json!({
         "aps": {
             "alert": {
-                "title": payload.title,
+                "title": "Iris Chat",
                 "body": payload.body
             },
             "mutable-content": 1
@@ -436,7 +436,7 @@ mod tests {
             request_body["aps"],
             json!({
                 "alert": {
-                    "title": "DM by Someone",
+                    "title": "Iris Chat",
                     "body": "New message"
                 },
                 "mutable-content": 1
