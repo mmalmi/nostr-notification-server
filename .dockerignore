@@ -1,4 +1,7 @@
 target/
 .git/
 .env
-db/ 
+db/
+db-sandbox/
+*.mdb
+**/*.mdb

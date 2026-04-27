@@ -135,7 +135,7 @@ impl DbHandler {
             .social_graph_snapshot_path
             .as_deref()
             .filter(|path| !path.trim().is_empty())
-            .and_then(|path| match ExternalSocialGraph::open(path) {
+            .and_then(|path| match ExternalSocialGraph::open(path, &root_hex) {
                 Ok(graph) => Some(graph),
                 Err(error) => {
                     warn!(
