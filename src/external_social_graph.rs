@@ -1,11 +1,16 @@
 use heed::byteorder::BigEndian;
 use heed::types::{SerdeBincode, Str, U32};
-use heed::{Database, Env, EnvFlags, EnvOpenOptions, RoTxn};
+use heed::{Database, Env, EnvFlags, EnvOpenOptions, Error as HeedError, RoTxn};
 use std::error::Error;
+use std::io;
 use std::path::Path;
+use std::thread;
+use std::time::Duration;
 
 const DEFAULT_MAP_SIZE: usize = 4 * 1024 * 1024 * 1024;
 const MAX_DBS: u32 = 16;
+const OPEN_RETRY_ATTEMPTS: usize = 12;
+const OPEN_RETRY_DELAY_MS: u64 = 250;
 
 const STR_TO_UNIQUE_ID_DB: &str = "str_to_unique_id";
 const FOLLOW_DISTANCE_BY_USER_DB: &str = "follow_distance_by_user";
@@ -25,13 +30,7 @@ impl ExternalSocialGraph {
             return Err(format!("social graph path does not exist: {}", path.display()).into());
         }
 
-        let mut options = EnvOpenOptions::new();
-        options.map_size(DEFAULT_MAP_SIZE).max_dbs(MAX_DBS);
-        unsafe {
-            options.flags(EnvFlags::READ_ONLY);
-        }
-
-        let env = unsafe { options.open(path)? };
+        let env = open_read_only_env_with_retries(path)?;
         Self::from_env(env)
     }
 
@@ -91,6 +90,37 @@ impl ExternalSocialGraph {
     }
 }
 
+fn open_read_only_env_with_retries(path: &Path) -> Result<Env, HeedError> {
+    for attempt in 0..=OPEN_RETRY_ATTEMPTS {
+        match open_read_only_env(path) {
+            Ok(env) => return Ok(env),
+            Err(error) if is_temporary_resource_error(&error) && attempt < OPEN_RETRY_ATTEMPTS => {
+                thread::sleep(Duration::from_millis(OPEN_RETRY_DELAY_MS));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    open_read_only_env(path)
+}
+
+fn open_read_only_env(path: &Path) -> Result<Env, HeedError> {
+    let mut options = EnvOpenOptions::new();
+    options.map_size(DEFAULT_MAP_SIZE).max_dbs(MAX_DBS);
+    unsafe {
+        options.flags(EnvFlags::READ_ONLY);
+        options.open(path)
+    }
+}
+
+fn is_temporary_resource_error(error: &HeedError) -> bool {
+    matches!(
+        error,
+        HeedError::Io(io_error)
+            if io_error.kind() == io::ErrorKind::WouldBlock || io_error.raw_os_error() == Some(11)
+    )
+}
+
 fn open_required_database<KC, DC>(
     env: &Env,
     rtxn: &RoTxn,
@@ -111,7 +141,7 @@ mod tests {
     use std::fs;
     use uuid::Uuid;
 
-    const TEST_MAP_SIZE: usize = 16 * 1024 * 1024;
+    const TEST_MAP_SIZE: usize = 128 * 1024 * 1024;
 
     #[test]
     fn reads_follow_distances_and_mute_lists_from_snapshot() {

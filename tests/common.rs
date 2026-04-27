@@ -59,6 +59,11 @@ tlK4174VirxgMGBIEnTKekbUAuahRANCAARuB6SGNmolhcYCxNqEQNVfqRJAhpam
 Xlng61e27oQ1/haR54V5BDazORFlO1DXJofc40N7iRqYnw7zGLBdzmZh
 -----END PRIVATE KEY-----"#;
 
+// The server opens both the main LMDB environment and a social-graph unique_ids
+// environment, so tests use a smaller map than production while staying above
+// the minimum startup size.
+const TEST_DB_MAP_SIZE: &str = "201326592";
+
 pub fn get_test_keys_pair(modifier: u8) -> (Keys, Keys) {
     let base_key1 = "1234567890123456789012345678901234567890123456789012345678901234";
     let base_key2 = "4321432143214321432143214321432143214321432143214321432143214321";
@@ -105,7 +110,7 @@ pub async fn start_server_with_extra_env(
     command
         .arg("run")
         .env("NNS_DB_PATH", &unique_db_path)
-        .env("NNS_DB_MAP_SIZE", "134217728")
+        .env("NNS_DB_MAP_SIZE", TEST_DB_MAP_SIZE)
         .env("NNS_RELAYS", "")
         .env("NNS_HOSTNAME", "0.0.0.0")
         .env("NNS_BASE_URL", "http://127.0.0.1:3030")
