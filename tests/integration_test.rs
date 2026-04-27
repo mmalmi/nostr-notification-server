@@ -778,7 +778,11 @@ async fn test_mobile_push_delivery(
     assert_eq!(apns["headers"]["apns-topic"].as_str().unwrap(), "to.iris");
     assert_eq!(
         apns["headers"]["apns-push-type"].as_str().unwrap(),
-        "background"
+        "alert"
+    );
+    assert_eq!(
+        apns["headers"]["apns-priority"].as_str().unwrap(),
+        "10"
     );
     assert_eq!(
         apns["body"]["event"]["id"].as_str().unwrap(),
@@ -794,8 +798,12 @@ async fn test_mobile_push_delivery(
         "ciphertext"
     );
     assert_eq!(
-        apns["body"]["aps"]["content-available"].as_u64().unwrap(),
+        apns["body"]["aps"]["mutable-content"].as_u64().unwrap(),
         1
+    );
+    assert_eq!(
+        apns["body"]["aps"]["alert"]["title"].as_str().unwrap(),
+        "DM by Someone"
     );
 }
 

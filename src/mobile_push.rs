@@ -155,8 +155,8 @@ pub async fn send_apns_push(
         .post(&endpoint)
         .header("authorization", format!("bearer {}", jwt))
         .header("apns-topic", topic)
-        .header("apns-push-type", "background")
-        .header("apns-priority", "5")
+        .header("apns-push-type", "alert")
+        .header("apns-priority", "10")
         .header("content-type", "application/json")
         .body(request_body_bytes);
     let response = request.send().await.map_err(|error| {
@@ -190,7 +190,11 @@ pub async fn send_apns_push(
 fn build_apns_request_body(payload: &NotificationPayload) -> serde_json::Value {
     json!({
         "aps": {
-            "content-available": 1
+            "alert": {
+                "title": payload.title,
+                "body": payload.body
+            },
+            "mutable-content": 1
         },
         "event": compact_event_payload_for_apns(&payload.event),
         "title": payload.title,
@@ -411,7 +415,7 @@ mod tests {
     }
 
     #[test]
-    fn build_apns_request_body_uses_background_push_payload() {
+    fn build_apns_request_body_uses_visible_mutable_payload() {
         let payload = NotificationPayload {
             event: sample_event_payload(),
             title: "DM by Someone".to_string(),
@@ -422,7 +426,16 @@ mod tests {
 
         let request_body = build_apns_request_body(&payload);
 
-        assert_eq!(request_body["aps"], json!({"content-available": 1}));
+        assert_eq!(
+            request_body["aps"],
+            json!({
+                "alert": {
+                    "title": "DM by Someone",
+                    "body": "New message"
+                },
+                "mutable-content": 1
+            })
+        );
         assert_eq!(
             request_body["event"]["id"].as_str().unwrap(),
             "4b68ab3847feda7d6c62c1fbcbeebfa35eab7351ed5e78f4ddadea5df64b8015"
