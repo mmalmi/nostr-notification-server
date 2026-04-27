@@ -119,30 +119,35 @@ pub async fn run_http_server(
     let get_subscriptions = subscriptions
         .clone()
         .and(warp::get())
+        .and(warp::path::end())
         .and_then(handle_get_subscriptions);
 
     let get_subscription = subscriptions
         .clone()
         .and(warp::get())
         .and(warp::path::param::<String>())
+        .and(warp::path::end())
         .and_then(handle_get_subscription);
 
     let update_subscription = subscriptions
         .clone()
         .and(warp::post())
         .and(warp::path::param::<String>())
+        .and(warp::path::end())
         .and(warp::body::json())
         .and_then(handle_update_subscription);
 
     let post_subscription = subscriptions
         .clone()
         .and(warp::post())
+        .and(warp::path::end())
         .and(warp::body::json())
         .and_then(handle_post_subscription);
 
     let delete_subscription = subscriptions
         .and(warp::delete())
         .and(warp::path::param::<String>())
+        .and(warp::path::end())
         .and_then(handle_delete_subscription);
 
     let info = warp::path("info")

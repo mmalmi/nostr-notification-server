@@ -37,11 +37,8 @@ impl ExternalSocialGraph {
 
     fn from_env(env: Env) -> Result<Self, Box<dyn Error + Send + Sync>> {
         let rtxn = env.read_txn()?;
-        let str_to_unique_id = open_required_database::<Str, U32<BigEndian>>(
-            &env,
-            &rtxn,
-            STR_TO_UNIQUE_ID_DB,
-        )?;
+        let str_to_unique_id =
+            open_required_database::<Str, U32<BigEndian>>(&env, &rtxn, STR_TO_UNIQUE_ID_DB)?;
         let follow_distance_by_user = open_required_database::<U32<BigEndian>, U32<BigEndian>>(
             &env,
             &rtxn,
@@ -103,8 +100,9 @@ where
     KC: heed::BytesEncode<'static> + heed::BytesDecode<'static> + 'static,
     DC: heed::BytesEncode<'static> + heed::BytesDecode<'static> + 'static,
 {
-    env.open_database(rtxn, Some(name))?
-        .ok_or_else(|| format!("required database missing from external social graph: {name}").into())
+    env.open_database(rtxn, Some(name))?.ok_or_else(|| {
+        format!("required database missing from external social graph: {name}").into()
+    })
 }
 
 #[cfg(test)]
@@ -115,10 +113,8 @@ mod tests {
 
     #[test]
     fn reads_follow_distances_and_mute_lists_from_snapshot() {
-        let path = std::env::temp_dir().join(format!(
-            "nns-external-social-graph-test-{}",
-            Uuid::new_v4()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("nns-external-social-graph-test-{}", Uuid::new_v4()));
         fs::create_dir_all(&path).unwrap();
 
         let env = unsafe {

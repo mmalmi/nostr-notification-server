@@ -205,8 +205,8 @@ impl DbHandler {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut wtxn = self.env.write_txn()?;
 
-        // For existing subscriptions, verify ownership and clean up old indices
-        if self.subscriptions.get(&wtxn, id)?.is_some() {
+        // For existing subscriptions, verify ownership and clean up old indices.
+        if let Some(old_sub_bytes) = self.subscriptions.get(&wtxn, id)? {
             let index_key = format!("{}:{}", pubkey, id);
             if !self
                 .subscriptions_by_pubkey_and_id
@@ -216,63 +216,82 @@ impl DbHandler {
                 return Err("Subscription not found or unauthorized".into());
             }
 
-            // Clean up old indices
-            if let Ok(Some(old_sub_bytes)) = self.subscriptions.get(&wtxn, id) {
-                if let Ok(old_sub) = Subscription::deserialize(old_sub_bytes) {
-                    // Clean up old p-tag indices
-                    if let Some(old_p_tags) = old_sub.filter.tags.get("#p") {
-                        for p_value in old_p_tags.iter() {
-                            let index_key = format!("{}:{}", p_value, id);
-                            self.subscriptions_by_p_tag_and_id
-                                .delete(&mut wtxn, &index_key)?;
-                        }
-                    }
-                    // Clean up old author indices
-                    if let Some(authors) = old_sub.filter.authors {
-                        for author in authors.iter() {
-                            let index_key = format!("{}:{}", author, id);
-                            self.subscriptions_by_author_and_id
-                                .delete(&mut wtxn, &index_key)?;
-                        }
-                    }
+            if let Ok(old_sub) = Subscription::deserialize(old_sub_bytes) {
+                self.delete_subscription_indices(&mut wtxn, pubkey, id, &old_sub)?;
+            }
+        }
+
+        let claimed_fcm_tokens: HashSet<String> = subscription
+            .fcm_tokens
+            .iter()
+            .map(|token| token.trim())
+            .filter(|token| !token.is_empty())
+            .map(ToOwned::to_owned)
+            .collect();
+        let claimed_apns_tokens: HashSet<String> = subscription
+            .apns_tokens
+            .iter()
+            .map(|token| token.trim())
+            .filter(|token| !token.is_empty())
+            .map(ToOwned::to_owned)
+            .collect();
+
+        if !claimed_fcm_tokens.is_empty() || !claimed_apns_tokens.is_empty() {
+            let mut touched = Vec::new();
+            for result in self.subscriptions.iter(&wtxn)? {
+                let (other_id, bytes) = result?;
+                if other_id == id {
+                    continue;
+                }
+                let mut other_sub = Subscription::deserialize(bytes)?;
+                let original_fcm_len = other_sub.fcm_tokens.len();
+                let original_apns_len = other_sub.apns_tokens.len();
+                other_sub
+                    .fcm_tokens
+                    .retain(|token| !claimed_fcm_tokens.contains(token.trim()));
+                other_sub
+                    .apns_tokens
+                    .retain(|token| !claimed_apns_tokens.contains(token.trim()));
+
+                if other_sub.fcm_tokens.len() != original_fcm_len
+                    || other_sub.apns_tokens.len() != original_apns_len
+                {
+                    touched.push((other_id.to_string(), other_sub));
+                }
+            }
+
+            for (other_id, other_sub) in touched {
+                let other_pubkey = other_sub.subscriber.clone();
+                if other_sub.is_empty() {
+                    self.subscriptions.delete(&mut wtxn, &other_id)?;
+                    self.delete_subscription_indices(
+                        &mut wtxn,
+                        &other_pubkey,
+                        &other_id,
+                        &other_sub,
+                    )?;
+                    debug!(
+                        "Deleted empty subscription {} after mobile push token moved to {}",
+                        other_id, id
+                    );
+                } else {
+                    let data = other_sub.serialize()?;
+                    self.subscriptions.put(&mut wtxn, &other_id, &data)?;
+                    debug!(
+                        "Removed moved mobile push token from subscription {} while saving {}",
+                        other_id, id
+                    );
                 }
             }
         }
 
         let data = subscription.serialize()?;
 
-        // Save subscription by ID in main db
+        // Save subscription by ID in main db.
         self.subscriptions.put(&mut wtxn, id, &data)?;
-
-        // Update pubkey index with composite key
-        let index_key = format!("{}:{}", pubkey, id);
-        self.subscriptions_by_pubkey_and_id
-            .put(&mut wtxn, &index_key, "")?;
+        self.put_subscription_indices(&mut wtxn, pubkey, id, subscription)?;
 
         debug!("Saving subscription with id: {}", id);
-
-        // Update p-tag index
-        if let Some(p_tags) = subscription.filter.tags.get("#p") {
-            debug!("Found #p tags in subscription: {:?}", p_tags);
-            for p_value in p_tags.iter() {
-                debug!("Processing p tag value: {}", p_value);
-                let index_key = format!("{}:{}", p_value, id);
-                self.subscriptions_by_p_tag_and_id
-                    .put(&mut wtxn, &index_key, "")?;
-                debug!("Added subscription to p tag index with key {}", index_key);
-            }
-        }
-
-        // Add author indices
-        if let Some(authors) = &subscription.filter.authors {
-            for author in authors.iter() {
-                let index_key = format!("{}:{}", author, id);
-                self.subscriptions_by_author_and_id
-                    .put(&mut wtxn, &index_key, "")?;
-                debug!("Added subscription to author index with key {}", index_key);
-            }
-        }
-
         wtxn.commit()?;
         Ok(())
     }
@@ -283,15 +302,88 @@ impl DbHandler {
         id: &str,
     ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
         let mut wtxn = self.env.write_txn()?;
+        let existing = self
+            .subscriptions
+            .get(&wtxn, id)?
+            .and_then(|bytes| Subscription::deserialize(bytes).ok());
         let existed = self.subscriptions.delete(&mut wtxn, id)?;
 
-        // Clean up indices
-        let index_key = format!("{}:{}", pubkey, id);
-        self.subscriptions_by_pubkey_and_id
-            .delete(&mut wtxn, &index_key)?;
+        if let Some(subscription) = existing.as_ref() {
+            self.delete_subscription_indices(&mut wtxn, pubkey, id, subscription)?;
+        } else {
+            let index_key = format!("{}:{}", pubkey, id);
+            self.subscriptions_by_pubkey_and_id
+                .delete(&mut wtxn, &index_key)?;
+        }
 
         wtxn.commit()?;
         Ok(existed)
+    }
+
+    fn put_subscription_indices(
+        &self,
+        wtxn: &mut heed::RwTxn<'_>,
+        pubkey: &str,
+        id: &str,
+        subscription: &Subscription,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let index_key = format!("{}:{}", pubkey, id);
+        self.subscriptions_by_pubkey_and_id
+            .put(wtxn, &index_key, "")?;
+
+        // Update p-tag index
+        if let Some(p_tags) = subscription.filter.tags.get("#p") {
+            debug!("Found #p tags in subscription: {:?}", p_tags);
+            for p_value in p_tags.iter() {
+                debug!("Processing p tag value: {}", p_value);
+                let index_key = format!("{}:{}", p_value, id);
+                self.subscriptions_by_p_tag_and_id
+                    .put(wtxn, &index_key, "")?;
+                debug!("Added subscription to p tag index with key {}", index_key);
+            }
+        }
+
+        // Add author indices
+        if let Some(authors) = &subscription.filter.authors {
+            for author in authors.iter() {
+                let index_key = format!("{}:{}", author, id);
+                self.subscriptions_by_author_and_id
+                    .put(wtxn, &index_key, "")?;
+                debug!("Added subscription to author index with key {}", index_key);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn delete_subscription_indices(
+        &self,
+        wtxn: &mut heed::RwTxn<'_>,
+        pubkey: &str,
+        id: &str,
+        subscription: &Subscription,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let index_key = format!("{}:{}", pubkey, id);
+        self.subscriptions_by_pubkey_and_id
+            .delete(wtxn, &index_key)?;
+
+        if let Some(p_tags) = subscription.filter.tags.get("#p") {
+            for p_value in p_tags.iter() {
+                let index_key = format!("{}:{}", p_value, id);
+                self.subscriptions_by_p_tag_and_id
+                    .delete(wtxn, &index_key)?;
+            }
+        }
+
+        if let Some(authors) = &subscription.filter.authors {
+            for author in authors.iter() {
+                let index_key = format!("{}:{}", author, id);
+                self.subscriptions_by_author_and_id
+                    .delete(wtxn, &index_key)?;
+            }
+        }
+
+        Ok(())
     }
 
     pub fn get_subscriptions_by_p_tag(

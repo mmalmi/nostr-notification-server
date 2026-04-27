@@ -381,7 +381,9 @@ async fn process_author(
         if should_log_info {
             info!("Processing subscription: {:?}", subscription);
         }
-        if subscription.matches_event(event) && subscription_allows_event(&subscription, event, db_handler)? {
+        if subscription.matches_event(event)
+            && subscription_allows_event(&subscription, event, db_handler)?
+        {
             let event_clone = event.clone();
             let settings_clone = settings.clone();
             let db_handler_clone = db_handler.clone();
@@ -436,7 +438,9 @@ async fn process_p_tag(
 
     for (subscription_id, subscription) in subscriptions {
         debug!("Processing subscription: {:?}", subscription);
-        if subscription.matches_event(event) && subscription_allows_event(&subscription, event, db_handler)? {
+        if subscription.matches_event(event)
+            && subscription_allows_event(&subscription, event, db_handler)?
+        {
             let event_clone = event.clone();
             let settings_clone = settings.clone();
             let db_handler_clone = db_handler.clone();
@@ -487,7 +491,10 @@ pub async fn send_notifications(
             now,
             settings.push_min_interval_seconds,
         )? {
-            debug!("Skipping web push target during cooldown: {}", push_sub.endpoint);
+            debug!(
+                "Skipping web push target during cooldown: {}",
+                push_sub.endpoint
+            );
             continue;
         }
 

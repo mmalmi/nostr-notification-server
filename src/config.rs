@@ -116,10 +116,9 @@ impl Settings {
             let relays: Vec<String> = relays_str
                 .split(',')
                 .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
                 .collect();
-            if !relays.is_empty() {
-                s = s.set_override("relays", relays)?;
-            }
+            s = s.set_override("relays", relays)?;
         }
 
         // Add other environment variables

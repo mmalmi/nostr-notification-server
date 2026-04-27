@@ -799,6 +799,130 @@ async fn test_mobile_push_delivery(
     );
 }
 
+async fn test_mobile_push_token_moves_between_subscriptions(
+    client: &Client,
+    received_fcm: Arc<Mutex<Vec<serde_json::Value>>>,
+) {
+    received_fcm.lock().await.clear();
+
+    let (old_subscriber_keys, old_author_keys) = get_test_keys_pair(11);
+    let (new_subscriber_keys, new_author_keys) = get_test_keys_pair(12);
+    let fcm_token = "fcm-token-moves-between-accounts";
+
+    let old_subscription = serde_json::json!({
+        "webhooks": [],
+        "web_push_subscriptions": [],
+        "fcm_tokens": [fcm_token],
+        "apns_tokens": [],
+        "filter": {
+            "kinds": [1060],
+            "authors": [old_author_keys.public_key().to_hex()]
+        }
+    });
+    let response = make_authed_request_with_keys(
+        client,
+        Method::POST,
+        "http://127.0.0.1:3030/subscriptions",
+        Some(old_subscription),
+        &old_subscriber_keys,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let old_created = response.json::<serde_json::Value>().await.unwrap();
+    let old_subscription_id = old_created["id"].as_str().unwrap().to_string();
+
+    let new_subscription = serde_json::json!({
+        "webhooks": [],
+        "web_push_subscriptions": [],
+        "fcm_tokens": [fcm_token],
+        "apns_tokens": [],
+        "filter": {
+            "kinds": [1060],
+            "authors": [new_author_keys.public_key().to_hex()]
+        }
+    });
+    let response = make_authed_request_with_keys(
+        client,
+        Method::POST,
+        "http://127.0.0.1:3030/subscriptions",
+        Some(new_subscription),
+        &new_subscriber_keys,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let old_get_url = format!(
+        "http://127.0.0.1:3030/subscriptions/{}",
+        old_subscription_id
+    );
+    let response = make_authed_request_with_keys(
+        client,
+        Method::GET,
+        &old_get_url,
+        None,
+        &old_subscriber_keys,
+    )
+    .await;
+    let old_get_status = response.status();
+    let old_get_body = response.text().await.unwrap_or_default();
+    assert_eq!(
+        old_get_status,
+        StatusCode::NOT_FOUND,
+        "Moving an FCM token to a new account should remove the old empty subscription; body: {}",
+        old_get_body
+    );
+
+    let old_event = UnsignedEvent::new(
+        old_author_keys.public_key(),
+        Timestamp::now(),
+        Kind::from(1060),
+        Vec::new(),
+        "old ciphertext".to_string(),
+    )
+    .sign(&old_author_keys)
+    .expect("Failed to sign old-author event");
+    let response = client
+        .post("http://127.0.0.1:3030/events")
+        .json(&old_event)
+        .send()
+        .await
+        .expect("Failed to send old-author event");
+    assert_eq!(response.status(), StatusCode::OK);
+    sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        received_fcm.lock().await.len(),
+        0,
+        "Old account subscription must not keep delivering to the moved FCM token"
+    );
+
+    let new_event = UnsignedEvent::new(
+        new_author_keys.public_key(),
+        Timestamp::now(),
+        Kind::from(1060),
+        Vec::new(),
+        "new ciphertext".to_string(),
+    )
+    .sign(&new_author_keys)
+    .expect("Failed to sign new-author event");
+    let response = client
+        .post("http://127.0.0.1:3030/events")
+        .json(&new_event)
+        .send()
+        .await
+        .expect("Failed to send new-author event");
+    assert_eq!(response.status(), StatusCode::OK);
+    sleep(Duration::from_millis(200)).await;
+
+    let fcm_requests = received_fcm.lock().await;
+    assert_eq!(fcm_requests.len(), 1, "Expected one FCM delivery attempt");
+    assert_eq!(
+        fcm_requests[0]["body"]["message"]["token"]
+            .as_str()
+            .unwrap(),
+        fcm_token
+    );
+}
+
 async fn test_seen_events_persistence(
     client: &Client,
     push_port: u16,
@@ -1283,7 +1407,8 @@ async fn test_integration() {
     )
     .await;
     test_mobile_subscription_endpoints(&client).await;
-    test_mobile_push_delivery(&client, received_fcm, received_apns).await;
+    test_mobile_push_delivery(&client, received_fcm.clone(), received_apns).await;
+    test_mobile_push_token_moves_between_subscriptions(&client, received_fcm).await;
     test_seen_events_persistence(
         &client,
         push_port,

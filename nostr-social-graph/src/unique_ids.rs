@@ -33,10 +33,16 @@ impl std::fmt::Display for UniqueIdError {
 
 impl UniqueIds {
     pub fn new(path: impl AsRef<Path>, serialized: Option<SerializedUniqueIds>) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_with_map_size(path, serialized, 1024 * 1024 * 1024)
+    }
+
+    pub fn new_with_map_size(
+        path: impl AsRef<Path>,
+        serialized: Option<SerializedUniqueIds>,
+        map_size: usize,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let mut env_builder = heed::EnvOpenOptions::new();
-        env_builder
-            .map_size(1024 * 1024 * 1024) // 1GB default size
-            .max_dbs(2);
+        env_builder.map_size(map_size).max_dbs(2);
         let env = unsafe { env_builder.open(path.as_ref())? };
         
         let (str_to_unique_id, unique_id_to_str) = {

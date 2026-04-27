@@ -37,7 +37,11 @@ impl SocialGraph {
         let unique_ids_path = env.path().join("unique_ids");
         std::fs::create_dir_all(&unique_ids_path)?;
         
-        let ids = UniqueIds::new(&unique_ids_path, serialized.as_ref().map(|s| s.unique_ids.clone()))
+        let ids = UniqueIds::new_with_map_size(
+            &unique_ids_path,
+            serialized.as_ref().map(|s| s.unique_ids.clone()),
+            env.info().map_size,
+        )
             .map_err(|e| SocialGraphError::Database(e.to_string()))?;
         let root_id = ids.get_or_create_id(root)?;
         
@@ -610,4 +614,3 @@ impl SocialGraph {
         Ok(self.followed_by_user.stat(txn)?.entries)
     }
 }
-
