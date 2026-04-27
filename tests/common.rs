@@ -105,7 +105,7 @@ pub async fn start_server_with_extra_env(
     command
         .arg("run")
         .env("NNS_DB_PATH", &unique_db_path)
-        .env("NNS_DB_MAP_SIZE", "33554432")
+        .env("NNS_DB_MAP_SIZE", "134217728")
         .env("NNS_RELAYS", "")
         .env("NNS_HOSTNAME", "0.0.0.0")
         .env("NNS_BASE_URL", "http://127.0.0.1:3030")

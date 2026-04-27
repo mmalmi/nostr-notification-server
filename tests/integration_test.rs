@@ -807,7 +807,7 @@ async fn test_mobile_push_token_moves_between_subscriptions(
 
     let (old_subscriber_keys, old_author_keys) = get_test_keys_pair(11);
     let (new_subscriber_keys, new_author_keys) = get_test_keys_pair(12);
-    let fcm_token = "fcm-token-moves-between-accounts";
+    let fcm_token = "fcm-token-moves-between-accounts:with-colon";
 
     let old_subscription = serde_json::json!({
         "webhooks": [],

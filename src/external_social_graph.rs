@@ -111,6 +111,8 @@ mod tests {
     use std::fs;
     use uuid::Uuid;
 
+    const TEST_MAP_SIZE: usize = 16 * 1024 * 1024;
+
     #[test]
     fn reads_follow_distances_and_mute_lists_from_snapshot() {
         let path =
@@ -119,7 +121,7 @@ mod tests {
 
         let env = unsafe {
             EnvOpenOptions::new()
-                .map_size(DEFAULT_MAP_SIZE)
+                .map_size(TEST_MAP_SIZE)
                 .max_dbs(MAX_DBS)
                 .open(&path)
                 .unwrap()

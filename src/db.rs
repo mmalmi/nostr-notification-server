@@ -8,7 +8,7 @@ use log::{debug, warn};
 use nostr_sdk::Event;
 use nostr_sdk::{FromBech32, PublicKey};
 use nostr_social_graph::{ProfileHandler, SerializedSocialGraph, SocialGraph};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::error::Error as StdError;
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -19,6 +19,8 @@ pub struct DbHandler {
     subscriptions_by_p_tag_and_id: Database<Str, Str>,
     subscriptions_by_pubkey_and_id: Database<Str, Str>,
     subscriptions_by_author_and_id: Database<Str, Str>,
+    subscriptions_by_fcm_token_and_id: Database<Str, Str>,
+    subscriptions_by_apns_token_and_id: Database<Str, Str>,
     pub social_graph: SocialGraph,
     pub profiles: ProfileHandler,
     metadata: Database<Str, Bytes>,
@@ -29,6 +31,15 @@ pub struct DbHandler {
     external_social_graph: Option<ExternalSocialGraph>,
 }
 
+const MOBILE_TOKEN_INDEX_VERSION_KEY: &str = "mobile_token_indices_version";
+const MOBILE_TOKEN_INDEX_VERSION: &[u8] = b"1";
+
+#[derive(Clone, Copy)]
+enum MobileTokenKind {
+    Fcm,
+    Apns,
+}
+
 impl DbHandler {
     pub fn new(settings: &Settings) -> Result<Self, Box<dyn StdError + Send + Sync>> {
         fs::create_dir_all(&settings.db_path)?;
@@ -36,7 +47,7 @@ impl DbHandler {
         let environment = unsafe {
             EnvOpenOptions::new()
                 .map_size(settings.db_map_size)
-                .max_dbs(20)
+                .max_dbs(32)
                 .open(&settings.db_path)?
         };
 
@@ -45,6 +56,8 @@ impl DbHandler {
             subscriptions_by_p_tag_and_id,
             subscriptions_by_pubkey_and_id,
             subscriptions_by_author_and_id,
+            subscriptions_by_fcm_token_and_id,
+            subscriptions_by_apns_token_and_id,
             metadata,
             seen_events,
             recipient_muted_pubkeys,
@@ -59,6 +72,10 @@ impl DbHandler {
                 environment.create_database(&mut wtxn, Some("subscriptions_by_pubkey_and_id"))?;
             let subscriptions_by_author_and_id =
                 environment.create_database(&mut wtxn, Some("subscriptions_by_author_and_id"))?;
+            let subscriptions_by_fcm_token_and_id = environment
+                .create_database(&mut wtxn, Some("subscriptions_by_fcm_token_and_id"))?;
+            let subscriptions_by_apns_token_and_id = environment
+                .create_database(&mut wtxn, Some("subscriptions_by_apns_token_and_id"))?;
             let metadata = environment.create_database(&mut wtxn, Some("metadata"))?;
             let seen_events = environment.create_database(&mut wtxn, Some("seen_events"))?;
             let recipient_muted_pubkeys =
@@ -73,6 +90,8 @@ impl DbHandler {
                 subscriptions_by_p_tag_and_id,
                 subscriptions_by_pubkey_and_id,
                 subscriptions_by_author_and_id,
+                subscriptions_by_fcm_token_and_id,
+                subscriptions_by_apns_token_and_id,
                 metadata,
                 seen_events,
                 recipient_muted_pubkeys,
@@ -127,12 +146,14 @@ impl DbHandler {
                 }
             });
 
-        Ok(Self {
+        let handler = Self {
             env: environment,
             subscriptions,
             subscriptions_by_p_tag_and_id,
             subscriptions_by_pubkey_and_id,
             subscriptions_by_author_and_id,
+            subscriptions_by_fcm_token_and_id,
+            subscriptions_by_apns_token_and_id,
             social_graph,
             profiles,
             metadata,
@@ -141,7 +162,10 @@ impl DbHandler {
             recipient_mute_list_created_at,
             push_target_last_sent_at,
             external_social_graph,
-        })
+        };
+
+        handler.ensure_mobile_token_indices()?;
+        Ok(handler)
     }
 
     pub fn get_subscriptions_for_pubkey(
@@ -221,75 +245,27 @@ impl DbHandler {
             }
         }
 
-        let claimed_fcm_tokens: HashSet<String> = subscription
-            .fcm_tokens
-            .iter()
-            .map(|token| token.trim())
-            .filter(|token| !token.is_empty())
-            .map(ToOwned::to_owned)
-            .collect();
-        let claimed_apns_tokens: HashSet<String> = subscription
-            .apns_tokens
-            .iter()
-            .map(|token| token.trim())
-            .filter(|token| !token.is_empty())
-            .map(ToOwned::to_owned)
-            .collect();
+        let mut stored_subscription = subscription.clone();
+        normalize_mobile_token_list(&mut stored_subscription.fcm_tokens);
+        normalize_mobile_token_list(&mut stored_subscription.apns_tokens);
+
+        let claimed_fcm_tokens = normalized_mobile_tokens(&stored_subscription.fcm_tokens);
+        let claimed_apns_tokens = normalized_mobile_tokens(&stored_subscription.apns_tokens);
 
         if !claimed_fcm_tokens.is_empty() || !claimed_apns_tokens.is_empty() {
-            let mut touched = Vec::new();
-            for result in self.subscriptions.iter(&wtxn)? {
-                let (other_id, bytes) = result?;
-                if other_id == id {
-                    continue;
-                }
-                let mut other_sub = Subscription::deserialize(bytes)?;
-                let original_fcm_len = other_sub.fcm_tokens.len();
-                let original_apns_len = other_sub.apns_tokens.len();
-                other_sub
-                    .fcm_tokens
-                    .retain(|token| !claimed_fcm_tokens.contains(token.trim()));
-                other_sub
-                    .apns_tokens
-                    .retain(|token| !claimed_apns_tokens.contains(token.trim()));
-
-                if other_sub.fcm_tokens.len() != original_fcm_len
-                    || other_sub.apns_tokens.len() != original_apns_len
-                {
-                    touched.push((other_id.to_string(), other_sub));
-                }
-            }
-
-            for (other_id, other_sub) in touched {
-                let other_pubkey = other_sub.subscriber.clone();
-                if other_sub.is_empty() {
-                    self.subscriptions.delete(&mut wtxn, &other_id)?;
-                    self.delete_subscription_indices(
-                        &mut wtxn,
-                        &other_pubkey,
-                        &other_id,
-                        &other_sub,
-                    )?;
-                    debug!(
-                        "Deleted empty subscription {} after mobile push token moved to {}",
-                        other_id, id
-                    );
-                } else {
-                    let data = other_sub.serialize()?;
-                    self.subscriptions.put(&mut wtxn, &other_id, &data)?;
-                    debug!(
-                        "Removed moved mobile push token from subscription {} while saving {}",
-                        other_id, id
-                    );
-                }
-            }
+            self.evict_mobile_token_owners(
+                &mut wtxn,
+                id,
+                &claimed_fcm_tokens,
+                &claimed_apns_tokens,
+            )?;
         }
 
-        let data = subscription.serialize()?;
+        let data = stored_subscription.serialize()?;
 
         // Save subscription by ID in main db.
         self.subscriptions.put(&mut wtxn, id, &data)?;
-        self.put_subscription_indices(&mut wtxn, pubkey, id, subscription)?;
+        self.put_subscription_indices(&mut wtxn, pubkey, id, &stored_subscription)?;
 
         debug!("Saving subscription with id: {}", id);
         wtxn.commit()?;
@@ -353,6 +329,8 @@ impl DbHandler {
             }
         }
 
+        self.put_mobile_token_indices(wtxn, id, subscription)?;
+
         Ok(())
     }
 
@@ -383,6 +361,259 @@ impl DbHandler {
             }
         }
 
+        self.delete_mobile_token_indices(wtxn, id, subscription)?;
+
+        Ok(())
+    }
+
+    fn mobile_token_database(&self, kind: MobileTokenKind) -> &Database<Str, Str> {
+        match kind {
+            MobileTokenKind::Fcm => &self.subscriptions_by_fcm_token_and_id,
+            MobileTokenKind::Apns => &self.subscriptions_by_apns_token_and_id,
+        }
+    }
+
+    fn put_mobile_token_indices(
+        &self,
+        wtxn: &mut heed::RwTxn<'_>,
+        id: &str,
+        subscription: &Subscription,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        for token in normalized_mobile_tokens(&subscription.fcm_tokens) {
+            let index_key = mobile_token_index_key(&token, id);
+            self.subscriptions_by_fcm_token_and_id
+                .put(wtxn, &index_key, "")?;
+        }
+
+        for token in normalized_mobile_tokens(&subscription.apns_tokens) {
+            let index_key = mobile_token_index_key(&token, id);
+            self.subscriptions_by_apns_token_and_id
+                .put(wtxn, &index_key, "")?;
+        }
+
+        Ok(())
+    }
+
+    fn delete_mobile_token_indices(
+        &self,
+        wtxn: &mut heed::RwTxn<'_>,
+        id: &str,
+        subscription: &Subscription,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        for token in normalized_mobile_tokens(&subscription.fcm_tokens) {
+            let index_key = mobile_token_index_key(&token, id);
+            self.subscriptions_by_fcm_token_and_id
+                .delete(wtxn, &index_key)?;
+        }
+
+        for token in normalized_mobile_tokens(&subscription.apns_tokens) {
+            let index_key = mobile_token_index_key(&token, id);
+            self.subscriptions_by_apns_token_and_id
+                .delete(wtxn, &index_key)?;
+        }
+
+        Ok(())
+    }
+
+    fn subscription_ids_for_mobile_tokens(
+        &self,
+        wtxn: &heed::RwTxn<'_>,
+        kind: MobileTokenKind,
+        tokens: &HashSet<String>,
+    ) -> Result<HashSet<String>, Box<dyn std::error::Error + Send + Sync>> {
+        let mut ids = HashSet::new();
+        let db = self.mobile_token_database(kind);
+
+        for token in tokens {
+            let prefix = mobile_token_index_prefix(token);
+            for result in db.prefix_iter(wtxn, &prefix)? {
+                let (key, _) = result?;
+                if let Some(id) = key.strip_prefix(&prefix) {
+                    ids.insert(id.to_string());
+                }
+            }
+        }
+
+        Ok(ids)
+    }
+
+    fn evict_mobile_token_owners(
+        &self,
+        wtxn: &mut heed::RwTxn<'_>,
+        current_id: &str,
+        claimed_fcm_tokens: &HashSet<String>,
+        claimed_apns_tokens: &HashSet<String>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut touched_ids = self.subscription_ids_for_mobile_tokens(
+            wtxn,
+            MobileTokenKind::Fcm,
+            claimed_fcm_tokens,
+        )?;
+        touched_ids.extend(self.subscription_ids_for_mobile_tokens(
+            wtxn,
+            MobileTokenKind::Apns,
+            claimed_apns_tokens,
+        )?);
+        touched_ids.remove(current_id);
+
+        for other_id in touched_ids {
+            let Some(bytes) = self.subscriptions.get(wtxn, &other_id)? else {
+                self.delete_mobile_token_index_keys(
+                    wtxn,
+                    &other_id,
+                    claimed_fcm_tokens,
+                    claimed_apns_tokens,
+                )?;
+                continue;
+            };
+
+            let original_sub = Subscription::deserialize(bytes)?;
+            let mut other_sub = original_sub.clone();
+            let mut fcm_changed = normalize_mobile_token_list(&mut other_sub.fcm_tokens);
+            fcm_changed |= retain_tokens_not_in_set(&mut other_sub.fcm_tokens, claimed_fcm_tokens);
+            let mut apns_changed = normalize_mobile_token_list(&mut other_sub.apns_tokens);
+            apns_changed |=
+                retain_tokens_not_in_set(&mut other_sub.apns_tokens, claimed_apns_tokens);
+
+            if !fcm_changed && !apns_changed {
+                self.delete_mobile_token_index_keys(
+                    wtxn,
+                    &other_id,
+                    claimed_fcm_tokens,
+                    claimed_apns_tokens,
+                )?;
+                continue;
+            }
+
+            self.delete_subscription_indices(
+                wtxn,
+                &original_sub.subscriber,
+                &other_id,
+                &original_sub,
+            )?;
+
+            if other_sub.is_empty() {
+                self.subscriptions.delete(wtxn, &other_id)?;
+                debug!(
+                    "Deleted empty subscription {} after mobile push token moved to {}",
+                    other_id, current_id
+                );
+            } else {
+                let data = other_sub.serialize()?;
+                self.subscriptions.put(wtxn, &other_id, &data)?;
+                self.put_subscription_indices(wtxn, &other_sub.subscriber, &other_id, &other_sub)?;
+                debug!(
+                    "Removed moved mobile push token from subscription {} while saving {}",
+                    other_id, current_id
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    fn delete_mobile_token_index_keys(
+        &self,
+        wtxn: &mut heed::RwTxn<'_>,
+        id: &str,
+        fcm_tokens: &HashSet<String>,
+        apns_tokens: &HashSet<String>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        for token in fcm_tokens {
+            let index_key = mobile_token_index_key(token, id);
+            self.subscriptions_by_fcm_token_and_id
+                .delete(wtxn, &index_key)?;
+        }
+        for token in apns_tokens {
+            let index_key = mobile_token_index_key(token, id);
+            self.subscriptions_by_apns_token_and_id
+                .delete(wtxn, &index_key)?;
+        }
+        Ok(())
+    }
+
+    fn ensure_mobile_token_indices(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        {
+            let rtxn = self.env.read_txn()?;
+            if self
+                .metadata
+                .get(&rtxn, MOBILE_TOKEN_INDEX_VERSION_KEY)?
+                .is_some_and(|version| version == MOBILE_TOKEN_INDEX_VERSION)
+            {
+                return Ok(());
+            }
+        }
+
+        self.rebuild_mobile_token_indices()
+    }
+
+    fn rebuild_mobile_token_indices(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let subscriptions = {
+            let rtxn = self.env.read_txn()?;
+            let mut subscriptions = Vec::new();
+            for result in self.subscriptions.iter(&rtxn)? {
+                let (id, bytes) = result?;
+                match Subscription::deserialize(bytes) {
+                    Ok(subscription) => subscriptions.push((id.to_string(), subscription)),
+                    Err(error) => warn!(
+                        "Skipping subscription {} during mobile token index rebuild: {}",
+                        id, error
+                    ),
+                }
+            }
+            subscriptions
+        };
+
+        let mut owner_by_fcm_token = HashMap::new();
+        let mut owner_by_apns_token = HashMap::new();
+        let mut wtxn = self.env.write_txn()?;
+        self.subscriptions_by_fcm_token_and_id.clear(&mut wtxn)?;
+        self.subscriptions_by_apns_token_and_id.clear(&mut wtxn)?;
+
+        for (id, original_subscription) in subscriptions {
+            let mut subscription = original_subscription.clone();
+            let mut changed = normalize_mobile_token_list(&mut subscription.fcm_tokens);
+            changed |= normalize_mobile_token_list(&mut subscription.apns_tokens);
+            changed |= retain_first_mobile_token_owner(
+                &mut subscription.fcm_tokens,
+                &mut owner_by_fcm_token,
+                &id,
+            );
+            changed |= retain_first_mobile_token_owner(
+                &mut subscription.apns_tokens,
+                &mut owner_by_apns_token,
+                &id,
+            );
+
+            if changed && subscription.is_empty() {
+                self.subscriptions.delete(&mut wtxn, &id)?;
+                self.delete_subscription_indices(
+                    &mut wtxn,
+                    &original_subscription.subscriber,
+                    &id,
+                    &original_subscription,
+                )?;
+                debug!(
+                    "Deleted empty subscription {} while rebuilding mobile token indices",
+                    id
+                );
+                continue;
+            }
+
+            if changed {
+                let data = subscription.serialize()?;
+                self.subscriptions.put(&mut wtxn, &id, &data)?;
+            }
+
+            self.put_subscription_indices(&mut wtxn, &subscription.subscriber, &id, &subscription)?;
+        }
+
+        self.metadata.put(
+            &mut wtxn,
+            MOBILE_TOKEN_INDEX_VERSION_KEY,
+            MOBILE_TOKEN_INDEX_VERSION,
+        )?;
+        wtxn.commit()?;
         Ok(())
     }
 
@@ -655,6 +886,78 @@ impl DbHandler {
         wtxn.commit()?;
         Ok(true)
     }
+}
+
+fn normalized_mobile_tokens(tokens: &[String]) -> HashSet<String> {
+    tokens
+        .iter()
+        .map(|token| token.trim())
+        .filter(|token| !token.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn normalize_mobile_token_list(tokens: &mut Vec<String>) -> bool {
+    let original = tokens.clone();
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::with_capacity(tokens.len());
+
+    for token in tokens.iter() {
+        let token = token.trim();
+        if !token.is_empty() && seen.insert(token.to_string()) {
+            normalized.push(token.to_string());
+        }
+    }
+
+    let changed = original != normalized;
+    if changed {
+        *tokens = normalized;
+    }
+    changed
+}
+
+fn retain_tokens_not_in_set(tokens: &mut Vec<String>, tokens_to_remove: &HashSet<String>) -> bool {
+    if tokens_to_remove.is_empty() {
+        return false;
+    }
+
+    let original_len = tokens.len();
+    tokens.retain(|token| !tokens_to_remove.contains(token.trim()));
+    original_len != tokens.len()
+}
+
+fn retain_first_mobile_token_owner(
+    tokens: &mut Vec<String>,
+    owner_by_token: &mut HashMap<String, String>,
+    id: &str,
+) -> bool {
+    let original = tokens.clone();
+    tokens.retain(|token| match owner_by_token.get(token) {
+        Some(owner_id) => owner_id == id,
+        None => {
+            owner_by_token.insert(token.clone(), id.to_string());
+            true
+        }
+    });
+    original != *tokens
+}
+
+fn mobile_token_index_prefix(token: &str) -> String {
+    format!("{}:", encode_mobile_token_index_component(token.trim()))
+}
+
+fn mobile_token_index_key(token: &str, id: &str) -> String {
+    format!("{}{}", mobile_token_index_prefix(token), id)
+}
+
+fn encode_mobile_token_index_component(value: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(value.len() * 2);
+    for byte in value.as_bytes() {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
 }
 
 pub struct DbStats {
