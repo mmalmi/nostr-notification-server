@@ -1266,7 +1266,7 @@ async fn test_muted_authors_are_blocked_without_social_graph_filter(
     );
 }
 
-async fn test_push_cooldown_only_throttles_push_targets(
+async fn test_push_rate_limit_allows_burst_and_throttles_push_targets(
     client: &Client,
     push_port: u16,
     webhook_port: u16,
@@ -1278,6 +1278,7 @@ async fn test_push_cooldown_only_throttles_push_targets(
 
     let (subscriber_keys, first_author_keys) = get_test_keys_pair(15);
     let (_, second_author_keys) = get_test_keys_pair(16);
+    let (_, third_author_keys) = get_test_keys_pair(17);
     let subscriber_pubkey = subscriber_keys.public_key().to_string();
 
     let browser_keys = generate_browser_keys();
@@ -1311,7 +1312,7 @@ async fn test_push_cooldown_only_throttles_push_targets(
         .json(&first_event)
         .send()
         .await
-        .expect("Failed to send first cooldown test event");
+        .expect("Failed to send first rate limit test event");
     assert_eq!(response.status(), StatusCode::OK);
 
     sleep(Duration::from_millis(150)).await;
@@ -1322,19 +1323,30 @@ async fn test_push_cooldown_only_throttles_push_targets(
         .json(&second_event)
         .send()
         .await
-        .expect("Failed to send second cooldown test event");
+        .expect("Failed to send second rate limit test event");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    sleep(Duration::from_millis(150)).await;
+
+    let third_event = create_test_event(&third_author_keys, &subscriber_pubkey);
+    let response = client
+        .post("http://127.0.0.1:3030/events")
+        .json(&third_event)
+        .send()
+        .await
+        .expect("Failed to send third rate limit test event");
     assert_eq!(response.status(), StatusCode::OK);
 
     sleep(Duration::from_millis(150)).await;
 
     assert_eq!(
         received_pushes.lock().await.len(),
-        1,
-        "Push delivery should be throttled during cooldown"
+        2,
+        "Push delivery should allow the configured burst before throttling"
     );
     assert_eq!(
         received_webhooks.lock().await.len(),
-        2,
+        3,
         "Webhook delivery should remain unthrottled"
     );
 }
@@ -1463,13 +1475,16 @@ async fn test_integration() {
         .await
         .expect("Failed to wait for process to exit");
 
-    let mut child = start_server_with_extra_env(vec![(
-        "NNS_PUSH_MIN_INTERVAL_SECONDS".to_string(),
-        "60".to_string(),
-    )])
+    let mut child = start_server_with_extra_env(vec![
+        ("NNS_PUSH_RATE_LIMIT_BURST".to_string(), "2".to_string()),
+        (
+            "NNS_PUSH_RATE_LIMIT_REFILL_SECONDS".to_string(),
+            "60".to_string(),
+        ),
+    ])
     .await;
 
-    test_push_cooldown_only_throttles_push_targets(
+    test_push_rate_limit_allows_burst_and_throttles_push_targets(
         &client,
         push_port,
         webhook_port,

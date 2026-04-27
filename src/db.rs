@@ -8,6 +8,7 @@ use log::{debug, warn};
 use nostr_sdk::Event;
 use nostr_sdk::{FromBech32, PublicKey};
 use nostr_social_graph::{ProfileHandler, SerializedSocialGraph, SocialGraph};
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::error::Error as StdError;
 use std::fs;
@@ -27,7 +28,7 @@ pub struct DbHandler {
     seen_events: Database<Str, U8>,
     recipient_muted_pubkeys: Database<Str, SerdeBincode<HashSet<String>>>,
     recipient_mute_list_created_at: Database<Str, U64<BigEndian>>,
-    push_target_last_sent_at: Database<Str, U64<BigEndian>>,
+    push_target_rate_limits: Database<Str, SerdeBincode<PushTargetRateLimitState>>,
     external_social_graph: Option<ExternalSocialGraph>,
 }
 
@@ -38,6 +39,12 @@ const MOBILE_TOKEN_INDEX_VERSION: &[u8] = b"1";
 enum MobileTokenKind {
     Fcm,
     Apns,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+struct PushTargetRateLimitState {
+    tokens: u32,
+    last_refill_at: u64,
 }
 
 impl DbHandler {
@@ -62,7 +69,7 @@ impl DbHandler {
             seen_events,
             recipient_muted_pubkeys,
             recipient_mute_list_created_at,
-            push_target_last_sent_at,
+            push_target_rate_limits,
         ) = {
             let mut wtxn = environment.write_txn()?;
             let subscriptions = environment.create_database(&mut wtxn, Some("subscriptions"))?;
@@ -82,8 +89,8 @@ impl DbHandler {
                 environment.create_database(&mut wtxn, Some("recipient_muted_pubkeys"))?;
             let recipient_mute_list_created_at =
                 environment.create_database(&mut wtxn, Some("recipient_mute_list_created_at"))?;
-            let push_target_last_sent_at =
-                environment.create_database(&mut wtxn, Some("push_target_last_sent_at"))?;
+            let push_target_rate_limits =
+                environment.create_database(&mut wtxn, Some("push_target_rate_limits"))?;
             wtxn.commit()?;
             (
                 subscriptions,
@@ -96,7 +103,7 @@ impl DbHandler {
                 seen_events,
                 recipient_muted_pubkeys,
                 recipient_mute_list_created_at,
-                push_target_last_sent_at,
+                push_target_rate_limits,
             )
         };
 
@@ -160,7 +167,7 @@ impl DbHandler {
             seen_events,
             recipient_muted_pubkeys,
             recipient_mute_list_created_at,
-            push_target_last_sent_at,
+            push_target_rate_limits,
             external_social_graph,
         };
 
@@ -867,22 +874,54 @@ impl DbHandler {
         &self,
         target_key: &str,
         now: u64,
-        cooldown_seconds: u64,
+        burst_capacity: u32,
+        refill_interval_seconds: u64,
     ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
-        if cooldown_seconds == 0 {
+        if burst_capacity == 0 || refill_interval_seconds == 0 {
             return Ok(true);
         }
 
         let mut wtxn = self.env.write_txn()?;
-        if let Some(last_sent_at) = self.push_target_last_sent_at.get(&wtxn, target_key)? {
-            if now < last_sent_at.saturating_add(cooldown_seconds) {
-                wtxn.abort();
-                return Ok(false);
-            }
+        let mut state = self
+            .push_target_rate_limits
+            .get(&wtxn, target_key)?
+            .unwrap_or(PushTargetRateLimitState {
+                tokens: burst_capacity,
+                last_refill_at: now,
+            });
+
+        state.tokens = state.tokens.min(burst_capacity);
+        if state.last_refill_at > now {
+            state.last_refill_at = now;
         }
 
-        self.push_target_last_sent_at
-            .put(&mut wtxn, target_key, &now)?;
+        let elapsed = now.saturating_sub(state.last_refill_at);
+        let refill_count = elapsed / refill_interval_seconds;
+        if refill_count > 0 {
+            let added_tokens = u32::try_from(refill_count).unwrap_or(u32::MAX);
+            state.tokens = state
+                .tokens
+                .saturating_add(added_tokens)
+                .min(burst_capacity);
+            state.last_refill_at = if state.tokens == burst_capacity {
+                now
+            } else {
+                state
+                    .last_refill_at
+                    .saturating_add(refill_count.saturating_mul(refill_interval_seconds))
+            };
+        }
+
+        if state.tokens == 0 {
+            self.push_target_rate_limits
+                .put(&mut wtxn, target_key, &state)?;
+            wtxn.commit()?;
+            return Ok(false);
+        }
+
+        state.tokens -= 1;
+        self.push_target_rate_limits
+            .put(&mut wtxn, target_key, &state)?;
         wtxn.commit()?;
         Ok(true)
     }

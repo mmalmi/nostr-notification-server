@@ -489,10 +489,11 @@ pub async fn send_notifications(
         if !db_handler.should_send_push_target(
             &target_key,
             now,
-            settings.push_min_interval_seconds,
+            settings.push_rate_limit_burst,
+            settings.push_rate_limit_refill_seconds,
         )? {
             debug!(
-                "Skipping web push target during cooldown: {}",
+                "Skipping web push target due to rate limit: {}",
                 push_sub.endpoint
             );
             continue;
@@ -516,9 +517,10 @@ pub async fn send_notifications(
         if !db_handler.should_send_push_target(
             &target_key,
             now,
-            settings.push_min_interval_seconds,
+            settings.push_rate_limit_burst,
+            settings.push_rate_limit_refill_seconds,
         )? {
-            debug!("Skipping FCM target during cooldown");
+            debug!("Skipping FCM target due to rate limit");
             continue;
         }
 
@@ -540,9 +542,10 @@ pub async fn send_notifications(
         if !db_handler.should_send_push_target(
             &target_key,
             now,
-            settings.push_min_interval_seconds,
+            settings.push_rate_limit_burst,
+            settings.push_rate_limit_refill_seconds,
         )? {
-            debug!("Skipping APNS target during cooldown");
+            debug!("Skipping APNS target due to rate limit");
             continue;
         }
 

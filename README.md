@@ -40,6 +40,11 @@ relays = [
 
 # Database size limit in bytes
 db_map_size = 1073741824  # 1GB
+
+# Web/mobile push rate limit per target: 20 immediate pushes,
+# then one token refilled every 6 seconds.
+push_rate_limit_burst = 20
+push_rate_limit_refill_seconds = 6
 ...
 ```
 
