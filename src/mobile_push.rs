@@ -220,7 +220,7 @@ fn compact_event_payload_for_apns(event: &EventPayload) -> serde_json::Value {
             "tags": event
                 .tags
                 .iter()
-                .filter(|tag| tag.as_slice().first().map_or(false, |value| value == "header"))
+                .filter(|tag| tag.as_slice().first().is_some_and(|value| value == "header"))
                 .map(|tag| tag.clone().to_vec())
                 .collect::<Vec<Vec<String>>>(),
             "content": event.content,
@@ -394,12 +394,12 @@ mod tests {
     use serde_json::json;
 
     fn sample_event_payload() -> EventPayload {
-        EventPayload::Full(
+        EventPayload::Full(Box::new(
             Event::from_json(
                 r#"{"id":"4b68ab3847feda7d6c62c1fbcbeebfa35eab7351ed5e78f4ddadea5df64b8015","pubkey":"f86c3c5d6a6924e0f1ff8d3cf6fcb09f5dcba238c2f1a68d0f4638b1cc403b4a","created_at":1700000000,"kind":1060,"tags":[],"content":"hello","sig":"4d7c79de55b59de3f3eb89e7dfc30ec443b13ac0b8e75cfd40c1d0acf7d500d7657ef0627c054b022cb35c50a6481d948e57843b4374c1c1ff717a8ba4a89822"}"#,
             )
             .expect("sample event should parse"),
-        )
+        ))
     }
 
     #[test]

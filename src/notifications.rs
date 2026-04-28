@@ -25,7 +25,7 @@ pub struct EventDetails {
 #[derive(Serialize, Debug, Clone)]
 #[serde(untagged)]
 pub enum EventPayload {
-    Full(Event),
+    Full(Box<Event>),
     Details(EventDetails),
 }
 
@@ -256,7 +256,7 @@ fn get_author_icon(pubkey: &str, db_handler: &Arc<DbHandler>, settings: &Setting
 
 fn create_event_payload(event: &Event) -> EventPayload {
     match serde_json::to_vec(event) {
-        Ok(serialized) if serialized.len() <= 4096 => EventPayload::Full(event.clone()),
+        Ok(serialized) if serialized.len() <= 4096 => EventPayload::Full(Box::new(event.clone())),
         _ => EventPayload::Details(EventDetails {
             id: event.id.to_hex(),
             author: event.pubkey.to_hex(),
@@ -354,7 +354,7 @@ async fn process_author(
     let has_header = event
         .tags
         .iter()
-        .any(|tag| tag.as_slice().get(0).map_or(false, |v| *v == "header"));
+        .any(|tag| tag.as_slice().first().is_some_and(|v| *v == "header"));
     let should_log_info = event.kind == Kind::Replaceable(30078) && has_header;
 
     if should_log_info {
@@ -409,7 +409,7 @@ async fn process_author(
 
 fn extract_p_tag_value(tag: &nostr_sdk::nostr::Tag) -> Option<&String> {
     let values = tag.as_slice();
-    if values.get(0).map(|v| *v == "p").unwrap_or(false) {
+    if values.first().map(|v| *v == "p").unwrap_or(false) {
         values.get(1)
     } else {
         None

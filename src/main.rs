@@ -15,13 +15,11 @@ pub mod web_push;
 
 use crate::config::Settings;
 use clap::{Parser, Subcommand};
-use env_logger;
 use log::{debug, error, info};
 use std::fs;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio;
 use tokio::signal;
 
 #[cfg(unix)]

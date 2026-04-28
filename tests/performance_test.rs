@@ -182,7 +182,7 @@ async fn test_subscription_matching_performance() {
         let mut attempts = 0;
         loop {
             let webhooks = webhooks_clone.lock().await;
-            if webhooks.len() > 0 {
+            if !webhooks.is_empty() {
                 println!("Webhook received after {} polling attempts", attempts);
                 let _ = tx.send(());
                 break;

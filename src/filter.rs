@@ -44,14 +44,13 @@ impl SubscriptionFilter {
         }
 
         for (tag_name, tag_values) in &self.tags {
-            if tag_name.starts_with('#') {
-                let tag_name = &tag_name[1..];
+            if let Some(tag_name) = tag_name.strip_prefix('#') {
                 let event_tag_values: Vec<_> = event
                     .tags
                     .iter()
                     .filter(|tag| {
                         tag.as_slice()
-                            .get(0)
+                            .first()
                             .map(|t| t == tag_name)
                             .unwrap_or(false)
                     })

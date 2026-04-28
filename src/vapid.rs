@@ -25,7 +25,7 @@ fn generate_vapid_keys() -> Result<(), Box<dyn std::error::Error>> {
 
     // Generate private key directly in PEM format
     Command::new("openssl")
-        .args(&[
+        .args([
             "ecparam",
             "-genkey",
             "-name",
@@ -37,7 +37,7 @@ fn generate_vapid_keys() -> Result<(), Box<dyn std::error::Error>> {
 
     // Extract the raw public key bytes
     let public_key_output = Command::new("openssl")
-        .args(&[
+        .args([
             "ec",
             "-in",
             PRIVATE_KEY_PATH,

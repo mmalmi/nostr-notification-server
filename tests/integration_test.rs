@@ -801,18 +801,21 @@ async fn test_mobile_push_delivery(
 async fn test_mobile_push_token_moves_between_subscriptions(
     client: &Client,
     received_fcm: Arc<Mutex<Vec<serde_json::Value>>>,
+    received_apns: Arc<Mutex<Vec<serde_json::Value>>>,
 ) {
     received_fcm.lock().await.clear();
+    received_apns.lock().await.clear();
 
     let (old_subscriber_keys, old_author_keys) = get_test_keys_pair(11);
     let (new_subscriber_keys, new_author_keys) = get_test_keys_pair(12);
     let fcm_token = "fcm-token-moves-between-accounts:with-colon";
+    let apns_token = "apns-token-moves-between-accounts";
 
     let old_subscription = serde_json::json!({
         "webhooks": [],
         "web_push_subscriptions": [],
         "fcm_tokens": [fcm_token],
-        "apns_tokens": [],
+        "apns_tokens": [apns_token],
         "filter": {
             "kinds": [1060],
             "authors": [old_author_keys.public_key().to_hex()]
@@ -834,7 +837,7 @@ async fn test_mobile_push_token_moves_between_subscriptions(
         "webhooks": [],
         "web_push_subscriptions": [],
         "fcm_tokens": [fcm_token],
-        "apns_tokens": [],
+        "apns_tokens": [apns_token],
         "filter": {
             "kinds": [1060],
             "authors": [new_author_keys.public_key().to_hex()]
@@ -893,6 +896,11 @@ async fn test_mobile_push_token_moves_between_subscriptions(
         0,
         "Old account subscription must not keep delivering to the moved FCM token"
     );
+    assert_eq!(
+        received_apns.lock().await.len(),
+        0,
+        "Old account subscription must not keep delivering to the moved APNS token"
+    );
 
     let new_event = UnsignedEvent::new(
         new_author_keys.public_key(),
@@ -920,6 +928,134 @@ async fn test_mobile_push_token_moves_between_subscriptions(
             .unwrap(),
         fcm_token
     );
+
+    let apns_requests = received_apns.lock().await;
+    assert_eq!(apns_requests.len(), 1, "Expected one APNS delivery attempt");
+    assert_eq!(apns_requests[0]["token"].as_str().unwrap(), apns_token);
+}
+
+async fn test_web_push_endpoint_moves_between_subscriptions(
+    client: &Client,
+    push_port: u16,
+    received_pushes: Arc<Mutex<Vec<serde_json::Value>>>,
+) {
+    received_pushes.lock().await.clear();
+
+    let (old_subscriber_keys, old_author_keys) = get_test_keys_pair(18);
+    let (new_subscriber_keys, new_author_keys) = get_test_keys_pair(19);
+
+    let browser_keys = generate_browser_keys();
+    let push_subscription = create_push_subscription(
+        &browser_keys,
+        &format!("http://127.0.0.1:{}/push", push_port),
+    );
+
+    let old_subscription = serde_json::json!({
+        "webhooks": [],
+        "web_push_subscriptions": [push_subscription.clone()],
+        "fcm_tokens": [],
+        "apns_tokens": [],
+        "filter": {
+            "kinds": [1],
+            "authors": [old_author_keys.public_key().to_hex()]
+        }
+    });
+    let response = make_authed_request_with_keys(
+        client,
+        Method::POST,
+        "http://127.0.0.1:3030/subscriptions",
+        Some(old_subscription),
+        &old_subscriber_keys,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let old_created = response.json::<serde_json::Value>().await.unwrap();
+    let old_subscription_id = old_created["id"].as_str().unwrap().to_string();
+
+    let new_subscription = serde_json::json!({
+        "webhooks": [],
+        "web_push_subscriptions": [push_subscription.clone()],
+        "fcm_tokens": [],
+        "apns_tokens": [],
+        "filter": {
+            "kinds": [1],
+            "authors": [new_author_keys.public_key().to_hex()]
+        }
+    });
+    let response = make_authed_request_with_keys(
+        client,
+        Method::POST,
+        "http://127.0.0.1:3030/subscriptions",
+        Some(new_subscription),
+        &new_subscriber_keys,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let old_get_url = format!(
+        "http://127.0.0.1:3030/subscriptions/{}",
+        old_subscription_id
+    );
+    let response = make_authed_request_with_keys(
+        client,
+        Method::GET,
+        &old_get_url,
+        None,
+        &old_subscriber_keys,
+    )
+    .await;
+    let old_get_status = response.status();
+    let old_get_body = response.text().await.unwrap_or_default();
+    assert_eq!(
+        old_get_status,
+        StatusCode::NOT_FOUND,
+        "Moving a web push endpoint to a new account should remove the old empty subscription; body: {}",
+        old_get_body
+    );
+
+    let old_event = UnsignedEvent::new(
+        old_author_keys.public_key(),
+        Timestamp::now(),
+        Kind::from(1),
+        Vec::new(),
+        "old content".to_string(),
+    )
+    .sign(&old_author_keys)
+    .expect("Failed to sign old-author web push event");
+    let response = client
+        .post("http://127.0.0.1:3030/events")
+        .json(&old_event)
+        .send()
+        .await
+        .expect("Failed to send old-author web push event");
+    assert_eq!(response.status(), StatusCode::OK);
+    sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        received_pushes.lock().await.len(),
+        0,
+        "Old account subscription must not keep delivering to the moved web push endpoint"
+    );
+
+    let new_event = UnsignedEvent::new(
+        new_author_keys.public_key(),
+        Timestamp::now(),
+        Kind::from(1),
+        Vec::new(),
+        "new content".to_string(),
+    )
+    .sign(&new_author_keys)
+    .expect("Failed to sign new-author web push event");
+    let response = client
+        .post("http://127.0.0.1:3030/events")
+        .json(&new_event)
+        .send()
+        .await
+        .expect("Failed to send new-author web push event");
+    assert_eq!(response.status(), StatusCode::OK);
+    sleep(Duration::from_millis(200)).await;
+
+    let pushes = received_pushes.lock().await;
+    assert_eq!(pushes.len(), 1, "Expected one web push delivery attempt");
 }
 
 async fn test_seen_events_persistence(
@@ -1418,8 +1554,15 @@ async fn test_integration() {
     )
     .await;
     test_mobile_subscription_endpoints(&client).await;
-    test_mobile_push_delivery(&client, received_fcm.clone(), received_apns).await;
-    test_mobile_push_token_moves_between_subscriptions(&client, received_fcm).await;
+    test_mobile_push_delivery(&client, received_fcm.clone(), received_apns.clone()).await;
+    test_mobile_push_token_moves_between_subscriptions(
+        &client,
+        received_fcm.clone(),
+        received_apns,
+    )
+    .await;
+    test_web_push_endpoint_moves_between_subscriptions(&client, push_port, received_pushes.clone())
+        .await;
     test_seen_events_persistence(
         &client,
         push_port,
@@ -1527,7 +1670,7 @@ async fn test_subscription_cors(client: &Client, push_port: u16, webhook_port: u
 
     // 1. Test POST new subscription with CORS
     let response = make_authed_request_with_keys(
-        &client,
+        client,
         Method::POST,
         "http://127.0.0.1:3030/subscriptions",
         Some(new_subscription),
@@ -1543,7 +1686,7 @@ async fn test_subscription_cors(client: &Client, push_port: u16, webhook_port: u
     // 2. Test GET subscription with CORS
     let get_url = format!("http://127.0.0.1:3030/subscriptions/{}", subscription_id);
     let response =
-        make_authed_request_with_keys(&client, Method::GET, &get_url, None, &subscriber_keys).await;
+        make_authed_request_with_keys(client, Method::GET, &get_url, None, &subscriber_keys).await;
 
     assert_eq!(response.status(), StatusCode::OK);
 

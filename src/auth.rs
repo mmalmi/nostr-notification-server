@@ -22,7 +22,7 @@ pub async fn verify_nostr_auth(
         let event_json = String::from_utf8(event_str)
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
 
-        let event: Event = serde_json::from_slice(&event_json.as_bytes())
+        let event: Event = serde_json::from_slice(event_json.as_bytes())
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
 
         // Verify event signature
@@ -39,7 +39,7 @@ pub async fn verify_nostr_auth(
         let current_time = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?
-            .as_secs() as u64;
+            .as_secs();
 
         let event_time = event.created_at.as_u64();
         if event_time > current_time + 600 {

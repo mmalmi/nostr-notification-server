@@ -8,7 +8,7 @@ use web_push::{
     WebPushError, WebPushMessageBuilder,
 };
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct WebPushSubscription {
     pub endpoint: String,
     pub auth: String,

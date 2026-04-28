@@ -2,7 +2,6 @@
 
 use base64::encode_config;
 use base64::URL_SAFE_NO_PAD;
-use bytes;
 use nostr_sdk::nostr::{Event, Keys, Kind, SecretKey, Tag, Timestamp, UnsignedEvent};
 use p256::{ecdh::EphemeralSecret, PublicKey};
 use rand::RngCore;

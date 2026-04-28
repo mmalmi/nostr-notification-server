@@ -1,6 +1,7 @@
 use crate::config::Settings;
 use crate::external_social_graph::ExternalSocialGraph;
 use crate::subscription::Subscription;
+use crate::web_push::WebPushSubscription;
 use heed::byteorder::BigEndian;
 use heed::types::*;
 use heed::{Database, Env, EnvOpenOptions};
@@ -20,6 +21,7 @@ pub struct DbHandler {
     subscriptions_by_p_tag_and_id: Database<Str, Str>,
     subscriptions_by_pubkey_and_id: Database<Str, Str>,
     subscriptions_by_author_and_id: Database<Str, Str>,
+    subscriptions_by_web_push_endpoint_and_id: Database<Str, Str>,
     subscriptions_by_fcm_token_and_id: Database<Str, Str>,
     subscriptions_by_apns_token_and_id: Database<Str, Str>,
     pub social_graph: SocialGraph,
@@ -32,11 +34,12 @@ pub struct DbHandler {
     external_social_graph: Option<ExternalSocialGraph>,
 }
 
-const MOBILE_TOKEN_INDEX_VERSION_KEY: &str = "mobile_token_indices_version";
-const MOBILE_TOKEN_INDEX_VERSION: &[u8] = b"1";
+const PUSH_TARGET_INDEX_VERSION_KEY: &str = "push_target_indices_version";
+const PUSH_TARGET_INDEX_VERSION: &[u8] = b"1";
 
 #[derive(Clone, Copy)]
-enum MobileTokenKind {
+enum PushTargetKind {
+    WebPush,
     Fcm,
     Apns,
 }
@@ -63,6 +66,7 @@ impl DbHandler {
             subscriptions_by_p_tag_and_id,
             subscriptions_by_pubkey_and_id,
             subscriptions_by_author_and_id,
+            subscriptions_by_web_push_endpoint_and_id,
             subscriptions_by_fcm_token_and_id,
             subscriptions_by_apns_token_and_id,
             metadata,
@@ -79,6 +83,8 @@ impl DbHandler {
                 environment.create_database(&mut wtxn, Some("subscriptions_by_pubkey_and_id"))?;
             let subscriptions_by_author_and_id =
                 environment.create_database(&mut wtxn, Some("subscriptions_by_author_and_id"))?;
+            let subscriptions_by_web_push_endpoint_and_id = environment
+                .create_database(&mut wtxn, Some("subscriptions_by_web_push_endpoint_and_id"))?;
             let subscriptions_by_fcm_token_and_id = environment
                 .create_database(&mut wtxn, Some("subscriptions_by_fcm_token_and_id"))?;
             let subscriptions_by_apns_token_and_id = environment
@@ -97,6 +103,7 @@ impl DbHandler {
                 subscriptions_by_p_tag_and_id,
                 subscriptions_by_pubkey_and_id,
                 subscriptions_by_author_and_id,
+                subscriptions_by_web_push_endpoint_and_id,
                 subscriptions_by_fcm_token_and_id,
                 subscriptions_by_apns_token_and_id,
                 metadata,
@@ -111,10 +118,8 @@ impl DbHandler {
         let root_hex = if root_pubkey.starts_with("npub") {
             PublicKey::from_bech32(root_pubkey)
                 .map_err(|e| {
-                    Box::new(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        e.to_string(),
-                    )) as Box<dyn StdError + Send + Sync>
+                    Box::new(std::io::Error::other(e.to_string()))
+                        as Box<dyn StdError + Send + Sync>
                 })?
                 .to_hex()
         } else {
@@ -128,14 +133,12 @@ impl DbHandler {
         )
         .map_err(|e| {
             let err_string = e.to_string();
-            Box::new(std::io::Error::new(std::io::ErrorKind::Other, err_string))
-                as Box<dyn StdError + Send + Sync>
+            Box::new(std::io::Error::other(err_string)) as Box<dyn StdError + Send + Sync>
         })?;
 
         let profiles = ProfileHandler::new(environment.clone()).map_err(|e| {
             let err_string = e.to_string();
-            Box::new(std::io::Error::new(std::io::ErrorKind::Other, err_string))
-                as Box<dyn StdError + Send + Sync>
+            Box::new(std::io::Error::other(err_string)) as Box<dyn StdError + Send + Sync>
         })?;
 
         let external_social_graph = settings
@@ -159,6 +162,7 @@ impl DbHandler {
             subscriptions_by_p_tag_and_id,
             subscriptions_by_pubkey_and_id,
             subscriptions_by_author_and_id,
+            subscriptions_by_web_push_endpoint_and_id,
             subscriptions_by_fcm_token_and_id,
             subscriptions_by_apns_token_and_id,
             social_graph,
@@ -171,7 +175,7 @@ impl DbHandler {
             external_social_graph,
         };
 
-        handler.ensure_mobile_token_indices()?;
+        handler.ensure_push_target_indices()?;
         Ok(handler)
     }
 
@@ -192,8 +196,7 @@ impl DbHandler {
                     self.subscriptions
                         .get(&rtxn, id)
                         .ok()?
-                        .map(|bytes| Subscription::deserialize(bytes).ok())
-                        .flatten()
+                        .and_then(|bytes| Subscription::deserialize(bytes).ok())
                         .map(|sub| (id.to_string(), sub))
                 })
             })
@@ -211,10 +214,10 @@ impl DbHandler {
 
         // First check if this subscription belongs to the pubkey
         let index_key = format!("{}:{}", pubkey, id);
-        if !self
+        if self
             .subscriptions_by_pubkey_and_id
             .get(&rtxn, &index_key)?
-            .is_some()
+            .is_none()
         {
             return Ok(None);
         }
@@ -239,10 +242,10 @@ impl DbHandler {
         // For existing subscriptions, verify ownership and clean up old indices.
         if let Some(old_sub_bytes) = self.subscriptions.get(&wtxn, id)? {
             let index_key = format!("{}:{}", pubkey, id);
-            if !self
+            if self
                 .subscriptions_by_pubkey_and_id
                 .get(&wtxn, &index_key)?
-                .is_some()
+                .is_none()
             {
                 return Err("Subscription not found or unauthorized".into());
             }
@@ -253,16 +256,23 @@ impl DbHandler {
         }
 
         let mut stored_subscription = subscription.clone();
-        normalize_mobile_token_list(&mut stored_subscription.fcm_tokens);
-        normalize_mobile_token_list(&mut stored_subscription.apns_tokens);
+        normalize_web_push_subscription_list(&mut stored_subscription.web_push_subscriptions);
+        normalize_push_token_list(&mut stored_subscription.fcm_tokens);
+        normalize_push_token_list(&mut stored_subscription.apns_tokens);
 
-        let claimed_fcm_tokens = normalized_mobile_tokens(&stored_subscription.fcm_tokens);
-        let claimed_apns_tokens = normalized_mobile_tokens(&stored_subscription.apns_tokens);
+        let claimed_web_push_endpoints =
+            normalized_web_push_endpoints(&stored_subscription.web_push_subscriptions);
+        let claimed_fcm_tokens = normalized_push_tokens(&stored_subscription.fcm_tokens);
+        let claimed_apns_tokens = normalized_push_tokens(&stored_subscription.apns_tokens);
 
-        if !claimed_fcm_tokens.is_empty() || !claimed_apns_tokens.is_empty() {
-            self.evict_mobile_token_owners(
+        if !claimed_web_push_endpoints.is_empty()
+            || !claimed_fcm_tokens.is_empty()
+            || !claimed_apns_tokens.is_empty()
+        {
+            self.evict_push_target_owners(
                 &mut wtxn,
                 id,
+                &claimed_web_push_endpoints,
                 &claimed_fcm_tokens,
                 &claimed_apns_tokens,
             )?;
@@ -336,7 +346,7 @@ impl DbHandler {
             }
         }
 
-        self.put_mobile_token_indices(wtxn, id, subscription)?;
+        self.put_push_target_indices(wtxn, id, subscription)?;
 
         Ok(())
     }
@@ -368,32 +378,39 @@ impl DbHandler {
             }
         }
 
-        self.delete_mobile_token_indices(wtxn, id, subscription)?;
+        self.delete_push_target_indices(wtxn, id, subscription)?;
 
         Ok(())
     }
 
-    fn mobile_token_database(&self, kind: MobileTokenKind) -> &Database<Str, Str> {
+    fn push_target_database(&self, kind: PushTargetKind) -> &Database<Str, Str> {
         match kind {
-            MobileTokenKind::Fcm => &self.subscriptions_by_fcm_token_and_id,
-            MobileTokenKind::Apns => &self.subscriptions_by_apns_token_and_id,
+            PushTargetKind::WebPush => &self.subscriptions_by_web_push_endpoint_and_id,
+            PushTargetKind::Fcm => &self.subscriptions_by_fcm_token_and_id,
+            PushTargetKind::Apns => &self.subscriptions_by_apns_token_and_id,
         }
     }
 
-    fn put_mobile_token_indices(
+    fn put_push_target_indices(
         &self,
         wtxn: &mut heed::RwTxn<'_>,
         id: &str,
         subscription: &Subscription,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        for token in normalized_mobile_tokens(&subscription.fcm_tokens) {
-            let index_key = mobile_token_index_key(&token, id);
+        for endpoint in normalized_web_push_endpoints(&subscription.web_push_subscriptions) {
+            let index_key = push_target_index_key(&endpoint, id);
+            self.subscriptions_by_web_push_endpoint_and_id
+                .put(wtxn, &index_key, "")?;
+        }
+
+        for token in normalized_push_tokens(&subscription.fcm_tokens) {
+            let index_key = push_target_index_key(&token, id);
             self.subscriptions_by_fcm_token_and_id
                 .put(wtxn, &index_key, "")?;
         }
 
-        for token in normalized_mobile_tokens(&subscription.apns_tokens) {
-            let index_key = mobile_token_index_key(&token, id);
+        for token in normalized_push_tokens(&subscription.apns_tokens) {
+            let index_key = push_target_index_key(&token, id);
             self.subscriptions_by_apns_token_and_id
                 .put(wtxn, &index_key, "")?;
         }
@@ -401,20 +418,26 @@ impl DbHandler {
         Ok(())
     }
 
-    fn delete_mobile_token_indices(
+    fn delete_push_target_indices(
         &self,
         wtxn: &mut heed::RwTxn<'_>,
         id: &str,
         subscription: &Subscription,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        for token in normalized_mobile_tokens(&subscription.fcm_tokens) {
-            let index_key = mobile_token_index_key(&token, id);
+        for endpoint in normalized_web_push_endpoints(&subscription.web_push_subscriptions) {
+            let index_key = push_target_index_key(&endpoint, id);
+            self.subscriptions_by_web_push_endpoint_and_id
+                .delete(wtxn, &index_key)?;
+        }
+
+        for token in normalized_push_tokens(&subscription.fcm_tokens) {
+            let index_key = push_target_index_key(&token, id);
             self.subscriptions_by_fcm_token_and_id
                 .delete(wtxn, &index_key)?;
         }
 
-        for token in normalized_mobile_tokens(&subscription.apns_tokens) {
-            let index_key = mobile_token_index_key(&token, id);
+        for token in normalized_push_tokens(&subscription.apns_tokens) {
+            let index_key = push_target_index_key(&token, id);
             self.subscriptions_by_apns_token_and_id
                 .delete(wtxn, &index_key)?;
         }
@@ -422,17 +445,17 @@ impl DbHandler {
         Ok(())
     }
 
-    fn subscription_ids_for_mobile_tokens(
+    fn subscription_ids_for_push_targets(
         &self,
         wtxn: &heed::RwTxn<'_>,
-        kind: MobileTokenKind,
-        tokens: &HashSet<String>,
+        kind: PushTargetKind,
+        targets: &HashSet<String>,
     ) -> Result<HashSet<String>, Box<dyn std::error::Error + Send + Sync>> {
         let mut ids = HashSet::new();
-        let db = self.mobile_token_database(kind);
+        let db = self.push_target_database(kind);
 
-        for token in tokens {
-            let prefix = mobile_token_index_prefix(token);
+        for target in targets {
+            let prefix = push_target_index_prefix(target);
             for result in db.prefix_iter(wtxn, &prefix)? {
                 let (key, _) = result?;
                 if let Some(id) = key.strip_prefix(&prefix) {
@@ -444,30 +467,37 @@ impl DbHandler {
         Ok(ids)
     }
 
-    fn evict_mobile_token_owners(
+    fn evict_push_target_owners(
         &self,
         wtxn: &mut heed::RwTxn<'_>,
         current_id: &str,
+        claimed_web_push_endpoints: &HashSet<String>,
         claimed_fcm_tokens: &HashSet<String>,
         claimed_apns_tokens: &HashSet<String>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let mut touched_ids = self.subscription_ids_for_mobile_tokens(
+        let mut touched_ids = self.subscription_ids_for_push_targets(
             wtxn,
-            MobileTokenKind::Fcm,
-            claimed_fcm_tokens,
+            PushTargetKind::WebPush,
+            claimed_web_push_endpoints,
         )?;
-        touched_ids.extend(self.subscription_ids_for_mobile_tokens(
+        touched_ids.extend(self.subscription_ids_for_push_targets(
             wtxn,
-            MobileTokenKind::Apns,
+            PushTargetKind::Fcm,
+            claimed_fcm_tokens,
+        )?);
+        touched_ids.extend(self.subscription_ids_for_push_targets(
+            wtxn,
+            PushTargetKind::Apns,
             claimed_apns_tokens,
         )?);
         touched_ids.remove(current_id);
 
         for other_id in touched_ids {
             let Some(bytes) = self.subscriptions.get(wtxn, &other_id)? else {
-                self.delete_mobile_token_index_keys(
+                self.delete_push_target_index_keys(
                     wtxn,
                     &other_id,
+                    claimed_web_push_endpoints,
                     claimed_fcm_tokens,
                     claimed_apns_tokens,
                 )?;
@@ -476,16 +506,23 @@ impl DbHandler {
 
             let original_sub = Subscription::deserialize(bytes)?;
             let mut other_sub = original_sub.clone();
-            let mut fcm_changed = normalize_mobile_token_list(&mut other_sub.fcm_tokens);
+            let mut web_push_changed =
+                normalize_web_push_subscription_list(&mut other_sub.web_push_subscriptions);
+            web_push_changed |= retain_web_push_endpoints_not_in_set(
+                &mut other_sub.web_push_subscriptions,
+                claimed_web_push_endpoints,
+            );
+            let mut fcm_changed = normalize_push_token_list(&mut other_sub.fcm_tokens);
             fcm_changed |= retain_tokens_not_in_set(&mut other_sub.fcm_tokens, claimed_fcm_tokens);
-            let mut apns_changed = normalize_mobile_token_list(&mut other_sub.apns_tokens);
+            let mut apns_changed = normalize_push_token_list(&mut other_sub.apns_tokens);
             apns_changed |=
                 retain_tokens_not_in_set(&mut other_sub.apns_tokens, claimed_apns_tokens);
 
-            if !fcm_changed && !apns_changed {
-                self.delete_mobile_token_index_keys(
+            if !web_push_changed && !fcm_changed && !apns_changed {
+                self.delete_push_target_index_keys(
                     wtxn,
                     &other_id,
+                    claimed_web_push_endpoints,
                     claimed_fcm_tokens,
                     claimed_apns_tokens,
                 )?;
@@ -498,19 +535,21 @@ impl DbHandler {
                 &other_id,
                 &original_sub,
             )?;
+            self.delete_push_target_indices(wtxn, &other_id, &original_sub)?;
 
             if other_sub.is_empty() {
                 self.subscriptions.delete(wtxn, &other_id)?;
                 debug!(
-                    "Deleted empty subscription {} after mobile push token moved to {}",
+                    "Deleted empty subscription {} after push target moved to {}",
                     other_id, current_id
                 );
             } else {
                 let data = other_sub.serialize()?;
                 self.subscriptions.put(wtxn, &other_id, &data)?;
                 self.put_subscription_indices(wtxn, &other_sub.subscriber, &other_id, &other_sub)?;
+                self.put_push_target_indices(wtxn, &other_id, &other_sub)?;
                 debug!(
-                    "Removed moved mobile push token from subscription {} while saving {}",
+                    "Removed moved push target from subscription {} while saving {}",
                     other_id, current_id
                 );
             }
@@ -519,42 +558,48 @@ impl DbHandler {
         Ok(())
     }
 
-    fn delete_mobile_token_index_keys(
+    fn delete_push_target_index_keys(
         &self,
         wtxn: &mut heed::RwTxn<'_>,
         id: &str,
+        web_push_endpoints: &HashSet<String>,
         fcm_tokens: &HashSet<String>,
         apns_tokens: &HashSet<String>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        for endpoint in web_push_endpoints {
+            let index_key = push_target_index_key(endpoint, id);
+            self.subscriptions_by_web_push_endpoint_and_id
+                .delete(wtxn, &index_key)?;
+        }
         for token in fcm_tokens {
-            let index_key = mobile_token_index_key(token, id);
+            let index_key = push_target_index_key(token, id);
             self.subscriptions_by_fcm_token_and_id
                 .delete(wtxn, &index_key)?;
         }
         for token in apns_tokens {
-            let index_key = mobile_token_index_key(token, id);
+            let index_key = push_target_index_key(token, id);
             self.subscriptions_by_apns_token_and_id
                 .delete(wtxn, &index_key)?;
         }
         Ok(())
     }
 
-    fn ensure_mobile_token_indices(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    fn ensure_push_target_indices(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         {
             let rtxn = self.env.read_txn()?;
             if self
                 .metadata
-                .get(&rtxn, MOBILE_TOKEN_INDEX_VERSION_KEY)?
-                .is_some_and(|version| version == MOBILE_TOKEN_INDEX_VERSION)
+                .get(&rtxn, PUSH_TARGET_INDEX_VERSION_KEY)?
+                .is_some_and(|version| version == PUSH_TARGET_INDEX_VERSION)
             {
                 return Ok(());
             }
         }
 
-        self.rebuild_mobile_token_indices()
+        self.rebuild_push_target_indices()
     }
 
-    fn rebuild_mobile_token_indices(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    fn rebuild_push_target_indices(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let subscriptions = {
             let rtxn = self.env.read_txn()?;
             let mut subscriptions = Vec::new();
@@ -563,7 +608,7 @@ impl DbHandler {
                 match Subscription::deserialize(bytes) {
                     Ok(subscription) => subscriptions.push((id.to_string(), subscription)),
                     Err(error) => warn!(
-                        "Skipping subscription {} during mobile token index rebuild: {}",
+                        "Skipping subscription {} during push target index rebuild: {}",
                         id, error
                     ),
                 }
@@ -571,22 +616,32 @@ impl DbHandler {
             subscriptions
         };
 
+        let mut owner_by_web_push_endpoint = HashMap::new();
         let mut owner_by_fcm_token = HashMap::new();
         let mut owner_by_apns_token = HashMap::new();
         let mut wtxn = self.env.write_txn()?;
+        self.subscriptions_by_web_push_endpoint_and_id
+            .clear(&mut wtxn)?;
         self.subscriptions_by_fcm_token_and_id.clear(&mut wtxn)?;
         self.subscriptions_by_apns_token_and_id.clear(&mut wtxn)?;
 
         for (id, original_subscription) in subscriptions {
             let mut subscription = original_subscription.clone();
-            let mut changed = normalize_mobile_token_list(&mut subscription.fcm_tokens);
-            changed |= normalize_mobile_token_list(&mut subscription.apns_tokens);
-            changed |= retain_first_mobile_token_owner(
+            let mut changed =
+                normalize_web_push_subscription_list(&mut subscription.web_push_subscriptions);
+            changed |= normalize_push_token_list(&mut subscription.fcm_tokens);
+            changed |= normalize_push_token_list(&mut subscription.apns_tokens);
+            changed |= retain_first_web_push_endpoint_owner(
+                &mut subscription.web_push_subscriptions,
+                &mut owner_by_web_push_endpoint,
+                &id,
+            );
+            changed |= retain_first_push_token_owner(
                 &mut subscription.fcm_tokens,
                 &mut owner_by_fcm_token,
                 &id,
             );
-            changed |= retain_first_mobile_token_owner(
+            changed |= retain_first_push_token_owner(
                 &mut subscription.apns_tokens,
                 &mut owner_by_apns_token,
                 &id,
@@ -601,7 +656,7 @@ impl DbHandler {
                     &original_subscription,
                 )?;
                 debug!(
-                    "Deleted empty subscription {} while rebuilding mobile token indices",
+                    "Deleted empty subscription {} while rebuilding push target indices",
                     id
                 );
                 continue;
@@ -617,8 +672,8 @@ impl DbHandler {
 
         self.metadata.put(
             &mut wtxn,
-            MOBILE_TOKEN_INDEX_VERSION_KEY,
-            MOBILE_TOKEN_INDEX_VERSION,
+            PUSH_TARGET_INDEX_VERSION_KEY,
+            PUSH_TARGET_INDEX_VERSION,
         )?;
         wtxn.commit()?;
         Ok(())
@@ -641,8 +696,7 @@ impl DbHandler {
                     self.subscriptions
                         .get(&rtxn, id)
                         .ok()?
-                        .map(|bytes| Subscription::deserialize(bytes).ok())
-                        .flatten()
+                        .and_then(|bytes| Subscription::deserialize(bytes).ok())
                         .map(|sub| (id.to_string(), sub))
                 })
             })
@@ -686,8 +740,7 @@ impl DbHandler {
                     self.subscriptions
                         .get(&rtxn, id)
                         .ok()?
-                        .map(|bytes| Subscription::deserialize(bytes).ok())
-                        .flatten()
+                        .and_then(|bytes| Subscription::deserialize(bytes).ok())
                         .map(|sub| (id.to_string(), sub))
                 })
             })
@@ -752,17 +805,13 @@ impl DbHandler {
         if current_count >= max_events as u64 {
             // Remove oldest entries (FIFO cleanup - simple approach)
             let to_remove = (current_count - max_events as u64 / 2) as usize;
-            let mut removed = 0;
             let mut keys_to_remove = Vec::new();
 
-            for result in self.seen_events.iter(&wtxn)? {
-                if let Ok((key, _)) = result {
-                    if removed >= to_remove {
-                        break;
-                    }
-                    keys_to_remove.push(key.to_string());
-                    removed += 1;
+            for (removed, (key, _)) in self.seen_events.iter(&wtxn)?.flatten().enumerate() {
+                if removed >= to_remove {
+                    break;
                 }
+                keys_to_remove.push(key.to_string());
             }
 
             for key in keys_to_remove {
@@ -927,7 +976,39 @@ impl DbHandler {
     }
 }
 
-fn normalized_mobile_tokens(tokens: &[String]) -> HashSet<String> {
+fn normalized_web_push_endpoints(subscriptions: &[WebPushSubscription]) -> HashSet<String> {
+    subscriptions
+        .iter()
+        .map(|subscription| subscription.endpoint.trim())
+        .filter(|endpoint| !endpoint.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn normalize_web_push_subscription_list(subscriptions: &mut Vec<WebPushSubscription>) -> bool {
+    let original = subscriptions.clone();
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::with_capacity(subscriptions.len());
+
+    for subscription in subscriptions.iter() {
+        let endpoint = subscription.endpoint.trim();
+        if endpoint.is_empty() || !seen.insert(endpoint.to_string()) {
+            continue;
+        }
+
+        let mut normalized_subscription = subscription.clone();
+        normalized_subscription.endpoint = endpoint.to_string();
+        normalized.push(normalized_subscription);
+    }
+
+    let changed = original != normalized;
+    if changed {
+        *subscriptions = normalized;
+    }
+    changed
+}
+
+fn normalized_push_tokens(tokens: &[String]) -> HashSet<String> {
     tokens
         .iter()
         .map(|token| token.trim())
@@ -936,7 +1017,7 @@ fn normalized_mobile_tokens(tokens: &[String]) -> HashSet<String> {
         .collect()
 }
 
-fn normalize_mobile_token_list(tokens: &mut Vec<String>) -> bool {
+fn normalize_push_token_list(tokens: &mut Vec<String>) -> bool {
     let original = tokens.clone();
     let mut seen = HashSet::new();
     let mut normalized = Vec::with_capacity(tokens.len());
@@ -955,6 +1036,20 @@ fn normalize_mobile_token_list(tokens: &mut Vec<String>) -> bool {
     changed
 }
 
+fn retain_web_push_endpoints_not_in_set(
+    subscriptions: &mut Vec<WebPushSubscription>,
+    endpoints_to_remove: &HashSet<String>,
+) -> bool {
+    if endpoints_to_remove.is_empty() {
+        return false;
+    }
+
+    let original_len = subscriptions.len();
+    subscriptions
+        .retain(|subscription| !endpoints_to_remove.contains(subscription.endpoint.trim()));
+    original_len != subscriptions.len()
+}
+
 fn retain_tokens_not_in_set(tokens: &mut Vec<String>, tokens_to_remove: &HashSet<String>) -> bool {
     if tokens_to_remove.is_empty() {
         return false;
@@ -965,7 +1060,25 @@ fn retain_tokens_not_in_set(tokens: &mut Vec<String>, tokens_to_remove: &HashSet
     original_len != tokens.len()
 }
 
-fn retain_first_mobile_token_owner(
+fn retain_first_web_push_endpoint_owner(
+    subscriptions: &mut Vec<WebPushSubscription>,
+    owner_by_endpoint: &mut HashMap<String, String>,
+    id: &str,
+) -> bool {
+    let original = subscriptions.clone();
+    subscriptions.retain(
+        |subscription| match owner_by_endpoint.get(&subscription.endpoint) {
+            Some(owner_id) => owner_id == id,
+            None => {
+                owner_by_endpoint.insert(subscription.endpoint.clone(), id.to_string());
+                true
+            }
+        },
+    );
+    original != *subscriptions
+}
+
+fn retain_first_push_token_owner(
     tokens: &mut Vec<String>,
     owner_by_token: &mut HashMap<String, String>,
     id: &str,
@@ -981,15 +1094,15 @@ fn retain_first_mobile_token_owner(
     original != *tokens
 }
 
-fn mobile_token_index_prefix(token: &str) -> String {
-    format!("{}:", encode_mobile_token_index_component(token.trim()))
+fn push_target_index_prefix(target: &str) -> String {
+    format!("{}:", encode_push_target_index_component(target.trim()))
 }
 
-fn mobile_token_index_key(token: &str, id: &str) -> String {
-    format!("{}{}", mobile_token_index_prefix(token), id)
+fn push_target_index_key(target: &str, id: &str) -> String {
+    format!("{}{}", push_target_index_prefix(target), id)
 }
 
-fn encode_mobile_token_index_component(value: &str) -> String {
+fn encode_push_target_index_component(value: &str) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut encoded = String::with_capacity(value.len() * 2);
     for byte in value.as_bytes() {
