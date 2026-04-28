@@ -35,9 +35,13 @@ async fn test_subscription_endpoints(client: &Client, push_port: u16, webhook_po
 
     // Generate browser keys for web push
     let browser_keys = generate_browser_keys();
+    let long_endpoint_token = "a".repeat(320);
     let push_subscription = create_push_subscription(
         &browser_keys,
-        &format!("http://127.0.0.1:{}/push", push_port),
+        &format!(
+            "http://127.0.0.1:{}/push?token={}",
+            push_port, long_endpoint_token
+        ),
     );
 
     // Test POST /subscriptions

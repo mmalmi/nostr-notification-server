@@ -10,6 +10,7 @@ use nostr_sdk::Event;
 use nostr_sdk::{FromBech32, PublicKey};
 use nostr_social_graph::{ProfileHandler, SerializedSocialGraph, SocialGraph};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::error::Error as StdError;
 use std::fs;
@@ -35,7 +36,7 @@ pub struct DbHandler {
 }
 
 const PUSH_TARGET_INDEX_VERSION_KEY: &str = "push_target_indices_version";
-const PUSH_TARGET_INDEX_VERSION: &[u8] = b"1";
+const PUSH_TARGET_INDEX_VERSION: &[u8] = b"2";
 
 #[derive(Clone, Copy)]
 enum PushTargetKind {
@@ -1104,8 +1105,9 @@ fn push_target_index_key(target: &str, id: &str) -> String {
 
 fn encode_push_target_index_component(value: &str) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut encoded = String::with_capacity(value.len() * 2);
-    for byte in value.as_bytes() {
+    let digest = Sha256::digest(value.as_bytes());
+    let mut encoded = String::with_capacity(digest.len() * 2);
+    for byte in digest {
         encoded.push(HEX[(byte >> 4) as usize] as char);
         encoded.push(HEX[(byte & 0x0f) as usize] as char);
     }
