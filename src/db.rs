@@ -325,25 +325,27 @@ impl DbHandler {
         self.subscriptions_by_pubkey_and_id
             .put(wtxn, &index_key, "")?;
 
-        // Update p-tag index
-        if let Some(p_tags) = subscription.filter.tags.get("#p") {
-            debug!("Found #p tags in subscription: {:?}", p_tags);
-            for p_value in p_tags.iter() {
-                debug!("Processing p tag value: {}", p_value);
-                let index_key = format!("{}:{}", p_value, id);
-                self.subscriptions_by_p_tag_and_id
-                    .put(wtxn, &index_key, "")?;
-                debug!("Added subscription to p tag index with key {}", index_key);
+        for filter in subscription.effective_filters() {
+            // Update p-tag index
+            if let Some(p_tags) = filter.tags.get("#p") {
+                debug!("Found #p tags in subscription: {:?}", p_tags);
+                for p_value in p_tags.iter() {
+                    debug!("Processing p tag value: {}", p_value);
+                    let index_key = format!("{}:{}", p_value, id);
+                    self.subscriptions_by_p_tag_and_id
+                        .put(wtxn, &index_key, "")?;
+                    debug!("Added subscription to p tag index with key {}", index_key);
+                }
             }
-        }
 
-        // Add author indices
-        if let Some(authors) = &subscription.filter.authors {
-            for author in authors.iter() {
-                let index_key = format!("{}:{}", author, id);
-                self.subscriptions_by_author_and_id
-                    .put(wtxn, &index_key, "")?;
-                debug!("Added subscription to author index with key {}", index_key);
+            // Add author indices
+            if let Some(authors) = &filter.authors {
+                for author in authors.iter() {
+                    let index_key = format!("{}:{}", author, id);
+                    self.subscriptions_by_author_and_id
+                        .put(wtxn, &index_key, "")?;
+                    debug!("Added subscription to author index with key {}", index_key);
+                }
             }
         }
 
@@ -363,19 +365,21 @@ impl DbHandler {
         self.subscriptions_by_pubkey_and_id
             .delete(wtxn, &index_key)?;
 
-        if let Some(p_tags) = subscription.filter.tags.get("#p") {
-            for p_value in p_tags.iter() {
-                let index_key = format!("{}:{}", p_value, id);
-                self.subscriptions_by_p_tag_and_id
-                    .delete(wtxn, &index_key)?;
+        for filter in subscription.effective_filters() {
+            if let Some(p_tags) = filter.tags.get("#p") {
+                for p_value in p_tags.iter() {
+                    let index_key = format!("{}:{}", p_value, id);
+                    self.subscriptions_by_p_tag_and_id
+                        .delete(wtxn, &index_key)?;
+                }
             }
-        }
 
-        if let Some(authors) = &subscription.filter.authors {
-            for author in authors.iter() {
-                let index_key = format!("{}:{}", author, id);
-                self.subscriptions_by_author_and_id
-                    .delete(wtxn, &index_key)?;
+            if let Some(authors) = &filter.authors {
+                for author in authors.iter() {
+                    let index_key = format!("{}:{}", author, id);
+                    self.subscriptions_by_author_and_id
+                        .delete(wtxn, &index_key)?;
+                }
             }
         }
 
@@ -1118,4 +1122,95 @@ pub struct DbStats {
     pub subscriptions: u64,
     pub social_graph: u64,
     pub profiles: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::filter::SubscriptionFilter;
+    use std::collections::BTreeMap;
+
+    fn test_settings(db_path: String) -> Settings {
+        Settings {
+            http_port: 3030,
+            base_url: "http://127.0.0.1:3030".to_string(),
+            vapid_public_key: String::new(),
+            vapid_private_key: String::new(),
+            db_path,
+            relays: Vec::new(),
+            db_map_size: 201_326_592,
+            icon_url: String::new(),
+            notification_base_url: String::new(),
+            social_graph_root_pubkey:
+                "d262414114b4dcfc6b8a2f8cb5fd26527636405d956316295debcb879f7c7cdf".to_string(),
+            use_social_graph: false,
+            social_graph_snapshot_path: None,
+            max_seen_events: 100,
+            max_p_tags: 10,
+            push_rate_limit_burst: 20,
+            push_rate_limit_refill_seconds: 6,
+            fcm_service_account_key: None,
+            fcm_api_base_url: String::new(),
+            apns_key_id: None,
+            apns_team_id: None,
+            apns_topic: None,
+            apns_environment: "production".to_string(),
+            apns_auth_key: None,
+            apns_api_base_url: String::new(),
+        }
+    }
+
+    fn filter(
+        authors: Option<Vec<String>>,
+        kinds: Option<Vec<u16>>,
+        tags: BTreeMap<String, Vec<String>>,
+    ) -> SubscriptionFilter {
+        SubscriptionFilter {
+            ids: None,
+            authors,
+            kinds,
+            search: None,
+            tags,
+        }
+    }
+
+    #[test]
+    fn save_subscription_indexes_extra_filters() -> Result<(), Box<dyn StdError + Send + Sync>> {
+        let unique = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let db_path = std::env::temp_dir()
+            .join(format!("nostr-notification-server-test-{unique}"))
+            .to_string_lossy()
+            .to_string();
+        let settings = test_settings(db_path.clone());
+        let db = DbHandler::new(&settings)?;
+
+        let author = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string();
+        let invite_recipient =
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string();
+        let mut invite_tags = BTreeMap::new();
+        invite_tags.insert("#p".to_string(), vec![invite_recipient.clone()]);
+
+        let subscription = Subscription {
+            webhooks: Vec::new(),
+            web_push_subscriptions: Vec::new(),
+            fcm_tokens: vec!["token".to_string()],
+            apns_tokens: Vec::new(),
+            social_graph_filter: false,
+            filter: filter(
+                Some(vec![author.clone()]),
+                Some(vec![1060]),
+                BTreeMap::new(),
+            ),
+            filters: vec![filter(None, Some(vec![1059]), invite_tags)],
+            subscriber: "subscriber".to_string(),
+        };
+
+        db.save_subscription("subscriber", "subscription", &subscription)?;
+
+        assert_eq!(db.get_subscriptions_by_author(&author)?.len(), 1);
+        assert_eq!(db.get_subscriptions_by_p_tag(&invite_recipient)?.len(), 1);
+
+        fs::remove_dir_all(db_path).ok();
+        Ok(())
+    }
 }

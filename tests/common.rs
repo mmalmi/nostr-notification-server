@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::process::Command;
 use tokio::sync::Mutex;
 use tokio::time::sleep;
@@ -119,11 +119,38 @@ pub async fn start_server_with_extra_env(
         command.env(key, value);
     }
 
-    let child = command.spawn().expect("Failed to start application");
-
-    // Give the server some time to start
-    sleep(Duration::from_secs(2)).await;
+    let mut child = command.spawn().expect("Failed to start application");
+    wait_for_server(&mut child).await;
     child
+}
+
+async fn wait_for_server(child: &mut tokio::process::Child) {
+    let client = Client::new();
+    let deadline = Instant::now() + Duration::from_secs(20);
+
+    loop {
+        if let Some(status) = child
+            .try_wait()
+            .expect("failed to check notification server process")
+        {
+            panic!("notification server exited before becoming ready: {status}");
+        }
+
+        if client
+            .get("http://127.0.0.1:3030/info")
+            .send()
+            .await
+            .is_ok_and(|response| response.status().is_success())
+        {
+            return;
+        }
+
+        assert!(
+            Instant::now() < deadline,
+            "notification server did not become ready within 20 seconds"
+        );
+        sleep(Duration::from_millis(100)).await;
+    }
 }
 
 pub async fn make_authed_request(

@@ -21,6 +21,8 @@ pub struct Subscription {
     pub social_graph_filter: bool,
     pub filter: SubscriptionFilter,
     #[serde(default)]
+    pub filters: Vec<SubscriptionFilter>,
+    #[serde(default)]
     pub subscriber: String,
 }
 
@@ -97,15 +99,25 @@ impl Subscription {
             apns_tokens: Vec::new(),
             social_graph_filter: false,
             filter,
+            filters: Vec::new(),
             subscriber: fbs.subscriber().unwrap_or_default().to_string(),
         })
+    }
+
+    pub fn effective_filters(&self) -> impl Iterator<Item = &SubscriptionFilter> {
+        std::iter::once(&self.filter).chain(self.filters.iter())
+    }
+
+    fn matches_any_filter(&self, event: &Event) -> bool {
+        self.effective_filters()
+            .any(|filter| filter.matches_event(event))
     }
 
     pub fn matches_event(&self, event: &Event) -> bool {
         if event.pubkey.to_hex() == self.subscriber {
             return false;
         }
-        self.filter.matches_event(event)
+        self.matches_any_filter(event)
     }
 
     pub fn merge(&mut self, other: Subscription) {
@@ -138,6 +150,68 @@ impl Subscription {
         bytes: &[u8],
         event: &Event,
     ) -> Result<bool, Box<dyn Error + Send + Sync>> {
-        Ok(Self::deserialize(bytes)?.filter.matches_event(event))
+        Ok(Self::deserialize(bytes)?.matches_any_filter(event))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    use nostr_sdk::{EventBuilder, Keys, Kind, Tag};
+
+    fn filter(
+        authors: Option<Vec<String>>,
+        kinds: Option<Vec<u16>>,
+        tags: BTreeMap<String, Vec<String>>,
+    ) -> SubscriptionFilter {
+        SubscriptionFilter {
+            ids: None,
+            authors,
+            kinds,
+            search: None,
+            tags,
+        }
+    }
+
+    #[test]
+    fn matches_event_accepts_any_effective_filter() {
+        let message_keys = Keys::generate();
+        let invite_recipient = Keys::generate().public_key().to_hex();
+        let subscriber = Keys::generate().public_key().to_hex();
+
+        let mut invite_tags = BTreeMap::new();
+        invite_tags.insert("#p".to_string(), vec![invite_recipient.clone()]);
+
+        let subscription = Subscription {
+            webhooks: Vec::new(),
+            web_push_subscriptions: Vec::new(),
+            fcm_tokens: vec!["token".to_string()],
+            apns_tokens: Vec::new(),
+            social_graph_filter: false,
+            filter: filter(
+                Some(vec![message_keys.public_key().to_hex()]),
+                Some(vec![1060]),
+                BTreeMap::new(),
+            ),
+            filters: vec![filter(None, Some(vec![1059]), invite_tags)],
+            subscriber,
+        };
+
+        let message_event = EventBuilder::new(Kind::from(1060), "ciphertext", [])
+            .to_event(&message_keys)
+            .expect("message event");
+        let invite_tag = Tag::parse(&["p", invite_recipient.as_str()]).expect("p tag");
+        let invite_event = EventBuilder::new(Kind::from(1059), "ciphertext", [invite_tag])
+            .to_event(&Keys::generate())
+            .expect("invite response event");
+        let unrelated_event = EventBuilder::new(Kind::from(1060), "ciphertext", [])
+            .to_event(&Keys::generate())
+            .expect("unrelated event");
+
+        assert!(subscription.matches_event(&message_event));
+        assert!(subscription.matches_event(&invite_event));
+        assert!(!subscription.matches_event(&unrelated_event));
     }
 }
