@@ -20,6 +20,14 @@ pub struct EventDetails {
     pub id: String,
     pub author: String,
     pub kind: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<Vec<String>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sig: Option<String>,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -257,12 +265,40 @@ fn get_author_icon(pubkey: &str, db_handler: &Arc<DbHandler>, settings: &Setting
 fn create_event_payload(event: &Event) -> EventPayload {
     match serde_json::to_vec(event) {
         Ok(serialized) if serialized.len() <= 4096 => EventPayload::Full(Box::new(event.clone())),
-        _ => EventPayload::Details(EventDetails {
-            id: event.id.to_hex(),
-            author: event.pubkey.to_hex(),
-            kind: event.kind.as_u16(),
-        }),
+        _ => EventPayload::Details(create_event_details(event)),
     }
+}
+
+fn create_event_details(event: &Event) -> EventDetails {
+    let mut details = EventDetails {
+        id: event.id.to_hex(),
+        author: event.pubkey.to_hex(),
+        kind: event.kind.as_u16(),
+        created_at: None,
+        tags: None,
+        content: None,
+        sig: None,
+    };
+    if event.kind.as_u16() == 1060 {
+        details.created_at = Some(event.created_at.as_u64());
+        details.tags = Some(header_tags(event));
+        details.content = Some(event.content.clone());
+        details.sig = Some(event.sig.to_string());
+    }
+    details
+}
+
+pub(crate) fn header_tags(event: &Event) -> Vec<Vec<String>> {
+    event
+        .tags
+        .iter()
+        .filter(|tag| {
+            tag.as_slice()
+                .first()
+                .is_some_and(|value| value == "header")
+        })
+        .map(|tag| tag.clone().to_vec())
+        .collect()
 }
 
 async fn send_webhook(
@@ -632,4 +668,49 @@ fn describe_error_chain(error: &dyn Error) -> String {
         source = next.source();
     }
     parts.join(": ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nostr_sdk::{EventBuilder, Keys, Tag};
+
+    #[test]
+    fn large_encrypted_message_payload_keeps_mobile_decrypt_fields() {
+        let keys = Keys::generate();
+        let mut tags = Vec::new();
+        for index in 0..80 {
+            let value = format!("{}-{index}", "x".repeat(100));
+            tags.push(Tag::parse(&["noise", value.as_str()]).expect("noise tag"));
+        }
+        tags.push(Tag::parse(&["header", "recipient", "ciphertext"]).expect("header tag"));
+        let event = EventBuilder::new(Kind::from(1060), "encrypted rumor", tags)
+            .to_event(&keys)
+            .expect("event");
+        assert!(
+            serde_json::to_vec(&event).expect("event json").len() > 4096,
+            "fixture must trigger compact event details"
+        );
+
+        let payload = create_event_payload(&event);
+
+        let EventPayload::Details(details) = payload else {
+            panic!("large event should use details payload");
+        };
+        assert_eq!(details.id, event.id.to_hex());
+        assert_eq!(details.author, event.pubkey.to_hex());
+        assert_eq!(details.kind, 1060);
+        assert_eq!(details.created_at, Some(event.created_at.as_u64()));
+        assert_eq!(details.content.as_deref(), Some("encrypted rumor"));
+        let sig = event.sig.to_string();
+        assert_eq!(details.sig.as_deref(), Some(sig.as_str()));
+        assert_eq!(
+            details.tags,
+            Some(vec![vec![
+                "header".to_string(),
+                "recipient".to_string(),
+                "ciphertext".to_string(),
+            ]])
+        );
+    }
 }

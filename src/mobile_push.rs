@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::config::Settings;
-use crate::notifications::{EventPayload, NotificationPayload};
+use crate::notifications::{header_tags, EventDetails, EventPayload, NotificationPayload};
 
 #[derive(Debug, Deserialize)]
 struct FcmServiceAccount {
@@ -58,7 +58,7 @@ pub async fn send_fcm_push(
         "{}/v1/projects/{}/messages:send",
         base_url, account.project_id
     );
-    let event_json = serde_json::to_string(&payload.event)?;
+    let event_json = fcm_event_payload_json(&payload.event)?;
     let request_body = json!({
         "message": {
             "token": token,
@@ -210,6 +210,13 @@ fn build_apns_request_body(payload: &NotificationPayload) -> serde_json::Value {
     })
 }
 
+fn fcm_event_payload_json(event: &EventPayload) -> Result<String, serde_json::Error> {
+    match event {
+        EventPayload::Full(event) => serde_json::to_string(event),
+        EventPayload::Details(details) => serde_json::to_string(&compact_event_details(details)),
+    }
+}
+
 fn compact_event_payload_for_apns(event: &EventPayload) -> serde_json::Value {
     match event {
         EventPayload::Full(event) => json!({
@@ -217,21 +224,32 @@ fn compact_event_payload_for_apns(event: &EventPayload) -> serde_json::Value {
             "pubkey": event.pubkey.to_hex(),
             "created_at": event.created_at.as_u64(),
             "kind": event.kind.as_u16(),
-            "tags": event
-                .tags
-                .iter()
-                .filter(|tag| tag.as_slice().first().is_some_and(|value| value == "header"))
-                .map(|tag| tag.clone().to_vec())
-                .collect::<Vec<Vec<String>>>(),
+            "tags": header_tags(event),
             "content": event.content,
             "sig": event.sig.to_string(),
         }),
-        EventPayload::Details(details) => json!({
-            "id": details.id,
-            "pubkey": details.author,
-            "kind": details.kind,
-        }),
+        EventPayload::Details(details) => compact_event_details(details),
     }
+}
+
+fn compact_event_details(details: &EventDetails) -> serde_json::Value {
+    let mut event = serde_json::Map::new();
+    event.insert("id".to_string(), json!(details.id));
+    event.insert("pubkey".to_string(), json!(details.author));
+    event.insert("kind".to_string(), json!(details.kind));
+    if let Some(created_at) = details.created_at {
+        event.insert("created_at".to_string(), json!(created_at));
+    }
+    if let Some(tags) = &details.tags {
+        event.insert("tags".to_string(), json!(tags));
+    }
+    if let Some(content) = &details.content {
+        event.insert("content".to_string(), json!(content));
+    }
+    if let Some(sig) = &details.sig {
+        event.insert("sig".to_string(), json!(sig));
+    }
+    serde_json::Value::Object(event)
 }
 
 fn build_apns_client(
@@ -387,8 +405,8 @@ fn abbreviate_token(token: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_apns_request_body, compact_event_payload_for_apns};
-    use crate::notifications::{EventPayload, NotificationPayload};
+    use super::{build_apns_request_body, compact_event_payload_for_apns, fcm_event_payload_json};
+    use crate::notifications::{EventDetails, EventPayload, NotificationPayload};
     use nostr_sdk::nostr::Event;
     use nostr_sdk::JsonUtil;
     use serde_json::json;
@@ -400,6 +418,22 @@ mod tests {
             )
             .expect("sample event should parse"),
         ))
+    }
+
+    fn large_message_details() -> EventDetails {
+        EventDetails {
+            id: "4b68ab3847feda7d6c62c1fbcbeebfa35eab7351ed5e78f4ddadea5df64b8015".to_string(),
+            author: "f86c3c5d6a6924e0f1ff8d3cf6fcb09f5dcba238c2f1a68d0f4638b1cc403b4a".to_string(),
+            kind: 1060,
+            created_at: Some(1_700_000_000),
+            tags: Some(vec![vec![
+                "header".to_string(),
+                "recipient".to_string(),
+                "ciphertext".to_string(),
+            ]]),
+            content: Some("encrypted rumor".to_string()),
+            sig: Some("a".repeat(128)),
+        }
     }
 
     #[test]
@@ -448,5 +482,53 @@ mod tests {
         );
         assert_eq!(request_body["event"]["kind"].as_u64().unwrap(), 1060);
         assert_eq!(request_body["event"]["content"].as_str().unwrap(), "hello");
+    }
+
+    #[test]
+    fn build_apns_request_body_keeps_decrypt_fields_from_large_event_details() {
+        let payload = NotificationPayload {
+            event: EventPayload::Details(large_message_details()),
+            title: "DM by Someone".to_string(),
+            body: "New message".to_string(),
+            icon: "https://example.com/icon.png".to_string(),
+            url: "https://example.com/note".to_string(),
+        };
+
+        let request_body = build_apns_request_body(&payload);
+
+        assert_eq!(request_body["event"]["kind"].as_u64().unwrap(), 1060);
+        assert_eq!(
+            request_body["event"]["created_at"].as_u64().unwrap(),
+            1_700_000_000
+        );
+        assert_eq!(
+            request_body["event"]["tags"],
+            json!([["header", "recipient", "ciphertext"]])
+        );
+        assert_eq!(
+            request_body["event"]["content"].as_str().unwrap(),
+            "encrypted rumor"
+        );
+        assert_eq!(request_body["event"]["sig"].as_str().unwrap().len(), 128);
+    }
+
+    #[test]
+    fn fcm_event_payload_keeps_decrypt_fields_from_large_event_details() {
+        let event_json =
+            fcm_event_payload_json(&EventPayload::Details(large_message_details())).unwrap();
+        let event = serde_json::from_str::<serde_json::Value>(&event_json).unwrap();
+
+        assert_eq!(event["kind"].as_u64().unwrap(), 1060);
+        assert_eq!(
+            event["pubkey"].as_str().unwrap(),
+            "f86c3c5d6a6924e0f1ff8d3cf6fcb09f5dcba238c2f1a68d0f4638b1cc403b4a"
+        );
+        assert!(
+            event.get("author").is_none(),
+            "mobile event JSON must use Nostr's pubkey field"
+        );
+        assert_eq!(event["created_at"].as_u64().unwrap(), 1_700_000_000);
+        assert_eq!(event["content"].as_str().unwrap(), "encrypted rumor");
+        assert_eq!(event["sig"].as_str().unwrap().len(), 128);
     }
 }
