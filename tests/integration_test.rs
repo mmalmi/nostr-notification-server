@@ -796,6 +796,7 @@ async fn test_mobile_push_delivery(
         "ciphertext"
     );
     assert_eq!(apns["body"]["aps"]["mutable-content"].as_u64().unwrap(), 1);
+    assert_eq!(apns["body"]["aps"]["sound"].as_str().unwrap(), "default");
     assert_eq!(
         apns["body"]["aps"]["alert"]["title"].as_str().unwrap(),
         "Iris Chat"

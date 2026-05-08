@@ -200,6 +200,7 @@ fn build_apns_request_body(payload: &NotificationPayload) -> serde_json::Value {
                 "title": "Iris Chat",
                 "body": payload.body
             },
+            "sound": "default",
             "mutable-content": 1
         },
         "event": compact_event_payload_for_apns(&payload.event),
@@ -473,6 +474,7 @@ mod tests {
                     "title": "Iris Chat",
                     "body": "New message"
                 },
+                "sound": "default",
                 "mutable-content": 1
             })
         );
