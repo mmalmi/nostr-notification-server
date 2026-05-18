@@ -9,6 +9,7 @@ use nostr_sdk::prelude::*;
 use nostr_sdk::{Kind, ToBech32};
 use serde::Serialize;
 use serde_json;
+use std::collections::HashSet;
 use std::error::Error;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -351,42 +352,101 @@ pub async fn handle_incoming_event(
         &event.content.chars().take(50).collect::<String>()
     );
 
-    // Process author subscriptions
-    let author = event.pubkey.to_hex();
-    process_author(&author, event, &db_handler, settings).await?;
+    let notification_jobs = collect_notification_jobs(event, &db_handler, settings)?;
 
-    // Process p-tag subscriptions
-    let p_tag_count = event
-        .tags
-        .iter()
-        .filter(|tag| extract_p_tag_value(tag).is_some())
-        .count();
+    for job in notification_jobs {
+        let event_clone = event.clone();
+        let settings_clone = settings.clone();
+        let db_handler_clone = db_handler.clone();
+        let subscription_id = job.subscription_id;
 
-    if settings.max_p_tags > 0 && p_tag_count > settings.max_p_tags {
-        debug!(
-            "Skipping p-tag notifications for event {} with {} p tags (max: {})",
-            event.id, p_tag_count, settings.max_p_tags
-        );
-    } else {
-        for tag in event.tags.iter() {
-            if let Some(p_value) = extract_p_tag_value(tag) {
-                let tag_start = Instant::now();
-                process_p_tag(p_value, event, &db_handler, settings).await?;
-                debug!("Tag processing took: {:?}", tag_start.elapsed());
+        tokio::spawn(async move {
+            if let Err(e) = send_notifications(
+                job.subscription,
+                &subscription_id,
+                event_clone,
+                Arc::new(settings_clone),
+                db_handler_clone,
+            )
+            .await
+            {
+                error!("Failed to send notification: {}", e);
             }
-        }
+        });
     }
 
     debug!("Total event processing took: {:?}", start.elapsed());
     Ok(())
 }
 
-async fn process_author(
-    author: &str,
+struct NotificationJob {
+    subscription_id: String,
+    subscription: Subscription,
+}
+
+fn collect_notification_jobs(
     event: &Event,
     db_handler: &Arc<DbHandler>,
     settings: &Settings,
+) -> Result<Vec<NotificationJob>, Box<dyn Error + Send + Sync>> {
+    let mut jobs = Vec::new();
+    let mut seen_subscription_ids = HashSet::new();
+
+    collect_author_notification_jobs(event, db_handler, &mut seen_subscription_ids, &mut jobs)?;
+
+    let p_tag_values = unique_p_tag_values(event);
+
+    if settings.max_p_tags > 0 && p_tag_values.len() > settings.max_p_tags {
+        debug!(
+            "Skipping p-tag notifications for event {} with {} p tags (max: {})",
+            event.id,
+            p_tag_values.len(),
+            settings.max_p_tags
+        );
+    } else {
+        for p_value in p_tag_values {
+            let tag_start = Instant::now();
+            collect_p_tag_notification_jobs(
+                &p_value,
+                event,
+                db_handler,
+                &mut seen_subscription_ids,
+                &mut jobs,
+            )?;
+            debug!("Tag processing took: {:?}", tag_start.elapsed());
+        }
+    }
+
+    Ok(jobs)
+}
+
+fn unique_p_tag_values(event: &Event) -> Vec<String> {
+    let mut seen_p_tags = HashSet::new();
+    event
+        .tags
+        .iter()
+        .filter_map(extract_p_tag_value)
+        .filter_map(|p_value| {
+            if seen_p_tags.insert(p_value.clone()) {
+                Some(p_value.clone())
+            } else {
+                debug!(
+                    "Skipping duplicate p_tag {} for event {}",
+                    p_value, event.id
+                );
+                None
+            }
+        })
+        .collect()
+}
+
+fn collect_author_notification_jobs(
+    event: &Event,
+    db_handler: &Arc<DbHandler>,
+    seen_subscription_ids: &mut HashSet<String>,
+    jobs: &mut Vec<NotificationJob>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let author = event.pubkey.to_hex();
     let has_header = event
         .tags
         .iter()
@@ -397,7 +457,7 @@ async fn process_author(
         info!("Processing author: {} for event: {}", author, event.id);
     }
 
-    let subscriptions = db_handler.get_subscriptions_by_author(author)?;
+    let subscriptions = db_handler.get_subscriptions_by_author(&author)?;
     if subscriptions.is_empty() {
         if should_log_info {
             info!("No subscriptions found for author: {}", author);
@@ -420,24 +480,13 @@ async fn process_author(
         if subscription.matches_event(event)
             && subscription_allows_event(&subscription, event, db_handler)?
         {
-            let event_clone = event.clone();
-            let settings_clone = settings.clone();
-            let db_handler_clone = db_handler.clone();
-            let subscription_id = subscription_id.clone();
-
-            tokio::spawn(async move {
-                if let Err(e) = send_notifications(
-                    subscription,
-                    &subscription_id, // Pass the ID here
-                    event_clone,
-                    Arc::new(settings_clone),
-                    db_handler_clone,
-                )
-                .await
-                {
-                    error!("Failed to send notification: {}", e);
-                }
-            });
+            push_notification_job(
+                subscription_id,
+                subscription,
+                seen_subscription_ids,
+                jobs,
+                event,
+            );
         }
     }
     Ok(())
@@ -452,11 +501,12 @@ fn extract_p_tag_value(tag: &nostr_sdk::nostr::Tag) -> Option<&String> {
     }
 }
 
-async fn process_p_tag(
+fn collect_p_tag_notification_jobs(
     p_value: &String,
     event: &Event,
     db_handler: &Arc<DbHandler>,
-    settings: &Settings,
+    seen_subscription_ids: &mut HashSet<String>,
+    jobs: &mut Vec<NotificationJob>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     debug!("Processing p_tag: {} for event: {}", p_value, event.id);
 
@@ -477,27 +527,37 @@ async fn process_p_tag(
         if subscription.matches_event(event)
             && subscription_allows_event(&subscription, event, db_handler)?
         {
-            let event_clone = event.clone();
-            let settings_clone = settings.clone();
-            let db_handler_clone = db_handler.clone();
-            let subscription_id = subscription_id.clone();
-
-            tokio::spawn(async move {
-                if let Err(e) = send_notifications(
-                    subscription,
-                    &subscription_id, // Pass the ID here
-                    event_clone,
-                    Arc::new(settings_clone),
-                    db_handler_clone,
-                )
-                .await
-                {
-                    error!("Failed to send notification: {}", e);
-                }
-            });
+            push_notification_job(
+                subscription_id,
+                subscription,
+                seen_subscription_ids,
+                jobs,
+                event,
+            );
         }
     }
     Ok(())
+}
+
+fn push_notification_job(
+    subscription_id: String,
+    subscription: Subscription,
+    seen_subscription_ids: &mut HashSet<String>,
+    jobs: &mut Vec<NotificationJob>,
+    event: &Event,
+) {
+    if !seen_subscription_ids.insert(subscription_id.clone()) {
+        debug!(
+            "Skipping duplicate subscription {} for event {}",
+            subscription_id, event.id
+        );
+        return;
+    }
+
+    jobs.push(NotificationJob {
+        subscription_id,
+        subscription,
+    });
 }
 
 pub async fn send_notifications(
@@ -510,8 +570,14 @@ pub async fn send_notifications(
     let mut tasks = Vec::new();
     let payload = create_notification_payload(&event, &settings, &db_handler).await;
     let now = current_unix_timestamp();
+    let mut queued_targets = HashSet::new();
 
     for webhook_url in subscription.webhooks.clone() {
+        let webhook_url = webhook_url.trim().to_string();
+        if webhook_url.is_empty() || !queued_targets.insert(format!("webhook:{webhook_url}")) {
+            continue;
+        }
+
         let payload = payload.clone();
         tasks.push(tokio::spawn(async move {
             send_webhook(&webhook_url, &payload)
@@ -521,7 +587,18 @@ pub async fn send_notifications(
     }
 
     for push_sub in subscription.web_push_subscriptions.clone() {
+        let mut push_sub = push_sub.clone();
+        push_sub.endpoint = push_sub.endpoint.trim().to_string();
+        if push_sub.endpoint.is_empty() {
+            continue;
+        }
+
         let target_key = format!("web_push:{}", push_sub.endpoint);
+        if !queued_targets.insert(target_key.clone()) {
+            debug!("Skipping duplicate web push target: {}", push_sub.endpoint);
+            continue;
+        }
+
         if !db_handler.should_send_push_target(
             &target_key,
             now,
@@ -549,7 +626,17 @@ pub async fn send_notifications(
     }
 
     for fcm_token in subscription.fcm_tokens.clone() {
+        let fcm_token = fcm_token.trim().to_string();
+        if fcm_token.is_empty() {
+            continue;
+        }
+
         let target_key = format!("fcm:{fcm_token}");
+        if !queued_targets.insert(target_key.clone()) {
+            debug!("Skipping duplicate FCM target");
+            continue;
+        }
+
         if !db_handler.should_send_push_target(
             &target_key,
             now,
@@ -574,7 +661,17 @@ pub async fn send_notifications(
     }
 
     for apns_token in subscription.apns_tokens.clone() {
+        let apns_token = apns_token.trim().to_string();
+        if apns_token.is_empty() {
+            continue;
+        }
+
         let target_key = format!("apns:{apns_token}");
+        if !queued_targets.insert(target_key.clone()) {
+            debug!("Skipping duplicate APNS target");
+            continue;
+        }
+
         if !db_handler.should_send_push_target(
             &target_key,
             now,
@@ -627,15 +724,21 @@ pub async fn send_notifications(
         || !fcm_tokens_to_remove.is_empty()
         || !apns_tokens_to_remove.is_empty()
     {
-        subscription
-            .web_push_subscriptions
-            .retain(|sub| !endpoints_to_remove.contains(&sub.endpoint));
-        subscription
-            .fcm_tokens
-            .retain(|token| !fcm_tokens_to_remove.contains(token));
-        subscription
-            .apns_tokens
-            .retain(|token| !apns_tokens_to_remove.contains(token));
+        subscription.web_push_subscriptions.retain(|sub| {
+            !endpoints_to_remove
+                .iter()
+                .any(|endpoint| endpoint == sub.endpoint.trim())
+        });
+        subscription.fcm_tokens.retain(|token| {
+            !fcm_tokens_to_remove
+                .iter()
+                .any(|removed| removed == token.trim())
+        });
+        subscription.apns_tokens.retain(|token| {
+            !apns_tokens_to_remove
+                .iter()
+                .any(|removed| removed == token.trim())
+        });
 
         if !subscription.is_empty() {
             db_handler.save_subscription(
@@ -673,7 +776,57 @@ fn describe_error_chain(error: &dyn Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::filter::SubscriptionFilter;
+    use std::collections::BTreeMap;
+    use tokio::sync::Mutex;
+    use tokio::time::{sleep, Duration};
+    use warp::Filter;
+
     use nostr_sdk::{EventBuilder, Keys, Tag};
+
+    fn test_settings(db_path: String) -> Settings {
+        Settings {
+            http_port: 3030,
+            base_url: "http://127.0.0.1:3030".to_string(),
+            vapid_public_key: String::new(),
+            vapid_private_key: String::new(),
+            db_path,
+            relays: Vec::new(),
+            db_map_size: 201_326_592,
+            icon_url: String::new(),
+            notification_base_url: "https://iris.to".to_string(),
+            social_graph_root_pubkey:
+                "d262414114b4dcfc6b8a2f8cb5fd26527636405d956316295debcb879f7c7cdf".to_string(),
+            use_social_graph: false,
+            social_graph_snapshot_path: None,
+            max_seen_events: 100,
+            max_p_tags: 10,
+            push_rate_limit_burst: 20,
+            push_rate_limit_refill_seconds: 6,
+            fcm_service_account_key: None,
+            fcm_api_base_url: String::new(),
+            apns_key_id: None,
+            apns_team_id: None,
+            apns_topic: None,
+            apns_environment: "production".to_string(),
+            apns_auth_key: None,
+            apns_api_base_url: String::new(),
+        }
+    }
+
+    fn filter(
+        authors: Option<Vec<String>>,
+        kinds: Option<Vec<u16>>,
+        tags: BTreeMap<String, Vec<String>>,
+    ) -> SubscriptionFilter {
+        SubscriptionFilter {
+            ids: None,
+            authors,
+            kinds,
+            search: None,
+            tags,
+        }
+    }
 
     #[test]
     fn large_encrypted_message_payload_keeps_mobile_decrypt_fields() {
@@ -712,5 +865,69 @@ mod tests {
                 "ciphertext".to_string(),
             ]])
         );
+    }
+
+    #[tokio::test]
+    async fn handle_incoming_event_sends_once_for_overlapping_subscription_matches(
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let received_webhooks = Arc::new(Mutex::new(Vec::new()));
+        let received_webhooks_clone = received_webhooks.clone();
+        let route = warp::post()
+            .and(warp::body::json())
+            .map(move |body: serde_json::Value| {
+                let received_webhooks = received_webhooks_clone.clone();
+                tokio::spawn(async move {
+                    received_webhooks.lock().await.push(body);
+                });
+                warp::reply::with_status(
+                    warp::reply::json(&serde_json::json!({})),
+                    warp::http::StatusCode::OK,
+                )
+            });
+        let (addr, server) = warp::serve(route).bind_ephemeral(([127, 0, 0, 1], 0));
+        tokio::spawn(server);
+
+        let unique = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let db_path = std::env::temp_dir()
+            .join(format!("nostr-notification-server-test-{unique}"))
+            .to_string_lossy()
+            .to_string();
+        let settings = test_settings(db_path.clone());
+        let db_handler = Arc::new(DbHandler::new(&settings)?);
+
+        let subscriber_keys = Keys::generate();
+        let sender_keys = Keys::generate();
+        let subscriber = subscriber_keys.public_key().to_hex();
+        let sender = sender_keys.public_key().to_hex();
+        let mut tags = BTreeMap::new();
+        tags.insert("#p".to_string(), vec![subscriber.clone()]);
+        let subscription = Subscription {
+            webhooks: vec![format!("http://127.0.0.1:{}/webhook", addr.port())],
+            web_push_subscriptions: Vec::new(),
+            fcm_tokens: Vec::new(),
+            apns_tokens: Vec::new(),
+            social_graph_filter: false,
+            filter: filter(Some(vec![sender.clone()]), Some(vec![1]), tags),
+            filters: Vec::new(),
+            subscriber: subscriber.clone(),
+        };
+        db_handler.save_subscription(&subscriber, "overlapping-subscription", &subscription)?;
+
+        let p_tag = Tag::public_key(subscriber_keys.public_key());
+        let event = EventBuilder::new(Kind::TextNote, "hello", [p_tag.clone(), p_tag])
+            .to_event(&sender_keys)
+            .expect("event");
+
+        handle_incoming_event(&event, db_handler, &settings).await?;
+        sleep(Duration::from_millis(200)).await;
+
+        assert_eq!(
+            received_webhooks.lock().await.len(),
+            1,
+            "same subscription should be delivered once per event"
+        );
+
+        std::fs::remove_dir_all(db_path).ok();
+        Ok(())
     }
 }
