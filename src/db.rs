@@ -6,8 +6,7 @@ use heed::byteorder::BigEndian;
 use heed::types::*;
 use heed::{Database, Env, EnvOpenOptions};
 use log::{debug, warn};
-use nostr_sdk::Event;
-use nostr_sdk::{FromBech32, PublicKey};
+use nostr_sdk::{Event, FromBech32, PublicKey};
 use nostr_social_graph::{ProfileHandler, SerializedSocialGraph, SocialGraph};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -28,7 +27,7 @@ pub struct DbHandler {
     pub social_graph: SocialGraph,
     pub profiles: ProfileHandler,
     metadata: Database<Str, Bytes>,
-    seen_events: Database<Str, U8>,
+    seen_events: Database<Str, Bytes>,
     recipient_muted_pubkeys: Database<Str, SerdeBincode<HashSet<String>>>,
     recipient_mute_list_created_at: Database<Str, U64<BigEndian>>,
     push_target_rate_limits: Database<Str, SerdeBincode<PushTargetRateLimitState>>,
@@ -805,27 +804,44 @@ impl DbHandler {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut wtxn = self.env.write_txn()?;
 
-        // Check current count and clean up if needed
         let current_count = self.seen_events.len(&wtxn)?;
         if current_count >= max_events as u64 {
-            // Remove oldest entries (FIFO cleanup - simple approach)
-            let to_remove = (current_count - max_events as u64 / 2) as usize;
-            let mut keys_to_remove = Vec::new();
-
-            for (removed, (key, _)) in self.seen_events.iter(&wtxn)?.flatten().enumerate() {
-                if removed >= to_remove {
-                    break;
-                }
-                keys_to_remove.push(key.to_string());
-            }
-
-            for key in keys_to_remove {
-                self.seen_events.delete(&mut wtxn, &key)?;
-            }
+            self.prune_seen_events(&mut wtxn, current_count, max_events)?;
         }
 
-        self.seen_events.put(&mut wtxn, event_id, &1u8)?;
+        let seen_at = current_unix_time().to_be_bytes();
+        self.seen_events.put(&mut wtxn, event_id, &seen_at)?;
         wtxn.commit()?;
+        Ok(())
+    }
+
+    fn prune_seen_events(
+        &self,
+        wtxn: &mut heed::RwTxn<'_>,
+        current_count: u64,
+        max_events: usize,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let target_count = (max_events as u64 / 2).max(1);
+        let to_remove = current_count.saturating_sub(target_count) as usize;
+        if to_remove == 0 {
+            return Ok(());
+        }
+
+        let mut entries = Vec::with_capacity(current_count as usize);
+        for result in self.seen_events.iter(wtxn)? {
+            let (key, value) = result?;
+            entries.push((seen_event_timestamp(value), key.to_string()));
+        }
+        entries.sort_unstable();
+
+        for (_, key) in entries.into_iter().take(to_remove) {
+            self.seen_events.delete(wtxn, &key)?;
+        }
+
+        debug!(
+            "Pruned {} seen events from duplicate tracking database",
+            to_remove
+        );
         Ok(())
     }
 
@@ -1116,6 +1132,23 @@ fn encode_push_target_index_component(value: &str) -> String {
         encoded.push(HEX[(byte & 0x0f) as usize] as char);
     }
     encoded
+}
+
+fn current_unix_time() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn seen_event_timestamp(value: &[u8]) -> u64 {
+    if value.len() != 8 {
+        return 0;
+    }
+
+    let mut bytes = [0u8; 8];
+    bytes.copy_from_slice(value);
+    u64::from_be_bytes(bytes)
 }
 
 pub struct DbStats {

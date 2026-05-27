@@ -318,24 +318,19 @@ pub async fn handle_incoming_event(
     settings: &Settings,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let start = Instant::now();
+    let updates_local_state = event.kind == Kind::Metadata
+        || (event.kind == Kind::ContactList && settings.use_social_graph)
+        || event.kind.as_u16() == 10_000;
 
-    // Check if we've seen this event before
-    let event_id = event.id.to_string();
-    match db_handler.has_seen_event(&event_id) {
-        Ok(true) => {
-            debug!("Event {} already seen, skipping", event_id);
-            return Ok(());
-        }
-        Ok(false) => {
-            // Mark event as seen to prevent duplicates
-            if let Err(e) = db_handler.mark_event_seen(&event_id, settings.max_seen_events) {
-                error!("Failed to mark event as seen: {}", e);
-            }
-        }
-        Err(e) => {
-            error!("Failed to check seen event: {}", e);
-            // Continue processing to avoid missing events due to DB errors
-        }
+    let notification_jobs = collect_notification_jobs(event, &db_handler, settings)?;
+    if notification_jobs.is_empty() && !updates_local_state {
+        debug!("Total event processing took: {:?}", start.elapsed());
+        return Ok(());
+    }
+
+    if let Err(e) = event.verify() {
+        debug!("Event signature verification failed: {:?}", e);
+        return Ok(());
     }
 
     if event.kind == Kind::Metadata {
@@ -352,7 +347,27 @@ pub async fn handle_incoming_event(
         &event.content.chars().take(50).collect::<String>()
     );
 
-    let notification_jobs = collect_notification_jobs(event, &db_handler, settings)?;
+    if notification_jobs.is_empty() {
+        debug!("Total event processing took: {:?}", start.elapsed());
+        return Ok(());
+    }
+
+    let event_id = event.id.to_string();
+    match db_handler.has_seen_event(&event_id) {
+        Ok(true) => {
+            debug!("Event {} already seen, skipping", event_id);
+            return Ok(());
+        }
+        Ok(false) => {
+            if let Err(e) = db_handler.mark_event_seen(&event_id, settings.max_seen_events) {
+                error!("Failed to mark event as seen: {}", e);
+            }
+        }
+        Err(e) => {
+            error!("Failed to check seen event: {}", e);
+            // Continue processing to avoid missing events due to DB errors
+        }
+    }
 
     for job in notification_jobs {
         let event_clone = event.clone();
@@ -826,6 +841,33 @@ mod tests {
             search: None,
             tags,
         }
+    }
+
+    #[tokio::test]
+    async fn irrelevant_firehose_event_is_not_persisted_as_seen(
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let unique = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let db_path = std::env::temp_dir()
+            .join(format!("nostr-notification-server-test-{unique}"))
+            .to_string_lossy()
+            .to_string();
+        let settings = test_settings(db_path.clone());
+        let db_handler = Arc::new(DbHandler::new(&settings)?);
+
+        let event = EventBuilder::new(Kind::TextNote, "firehose noise", [])
+            .to_event(&Keys::generate())
+            .expect("event");
+
+        handle_incoming_event(&event, db_handler.clone(), &settings).await?;
+
+        assert_eq!(
+            db_handler.get_seen_events_count()?,
+            0,
+            "events without notification jobs should not grow seen_events"
+        );
+
+        std::fs::remove_dir_all(db_path).ok();
+        Ok(())
     }
 
     #[test]
