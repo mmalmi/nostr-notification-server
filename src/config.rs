@@ -2,6 +2,14 @@ use crate::vapid;
 use config::{Config, ConfigError, Environment, File};
 use log::{debug, error};
 use serde::Deserialize;
+use std::collections::HashMap;
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct ApnsCredential {
+    pub key_id: String,
+    pub team_id: String,
+    pub auth_key: String,
+}
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Settings {
@@ -46,6 +54,8 @@ pub struct Settings {
     pub apns_environment: String,
     #[serde(default)]
     pub apns_auth_key: Option<String>,
+    #[serde(default)]
+    pub apns_credentials: HashMap<String, ApnsCredential>,
     #[serde(default = "default_apns_api_base_url")]
     pub apns_api_base_url: String,
 }
@@ -139,6 +149,12 @@ impl Settings {
 
         let config = s.build()?;
         let mut settings: Settings = config.try_deserialize()?;
+        if let Ok(credentials_json) = std::env::var("NNS_APNS_CREDENTIALS_JSON") {
+            settings.apns_credentials =
+                serde_json::from_str(&credentials_json).map_err(|error| {
+                    ConfigError::Message(format!("invalid NNS_APNS_CREDENTIALS_JSON: {error}"))
+                })?;
+        }
 
         // Ensure VAPID keys exist and load them
         let (private_key, public_key) = vapid::ensure_vapid_keys().map_err(|e| {

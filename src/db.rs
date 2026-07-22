@@ -1189,6 +1189,7 @@ mod tests {
             apns_topic: None,
             apns_environment: "production".to_string(),
             apns_auth_key: None,
+            apns_credentials: Default::default(),
             apns_api_base_url: String::new(),
         }
     }

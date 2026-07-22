@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::error::Error;
 use std::fs;
 use std::net::{SocketAddr, ToSocketAddrs};
@@ -10,7 +11,7 @@ use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::config::Settings;
+use crate::config::{ApnsCredential, Settings};
 use crate::notifications::{header_tags, EventDetails, EventPayload, NotificationPayload};
 
 #[derive(Debug, Deserialize)]
@@ -106,32 +107,35 @@ pub async fn send_apns_push(
     subscription_topic: Option<&str>,
     subscription_environment: Option<&str>,
 ) -> Result<bool, Box<dyn Error + Send + Sync>> {
-    let key_id = match trimmed_non_empty(settings.apns_key_id.as_deref()) {
-        Some(value) => value.to_string(),
-        None => return Ok(false),
-    };
-    let team_id = match trimmed_non_empty(settings.apns_team_id.as_deref()) {
-        Some(value) => value.to_string(),
-        None => return Ok(false),
-    };
     let topic = match trimmed_non_empty(subscription_topic)
         .or_else(|| trimmed_non_empty(settings.apns_topic.as_deref()))
     {
-        Some(value) => value.to_string(),
+        Some(value) => value,
         None => return Ok(false),
     };
-    let auth_key_pem = match load_secret_value(&settings.apns_auth_key)? {
+    let (key_id, team_id, auth_key) = match resolve_apns_credentials(
+        topic,
+        &settings.apns_credentials,
+        settings.apns_topic.as_deref(),
+        settings.apns_key_id.as_deref(),
+        settings.apns_team_id.as_deref(),
+        settings.apns_auth_key.as_deref(),
+    ) {
+        Some(values) => values,
+        None => return Ok(false),
+    };
+    let auth_key_pem = match load_secret_value(Some(auth_key))? {
         Some(value) => value,
         None => return Ok(false),
     };
 
     let now = unix_now()?;
     let mut header = Header::new(Algorithm::ES256);
-    header.kid = Some(key_id);
+    header.kid = Some(key_id.to_string());
     let jwt = encode(
         &header,
         &ApnsClaims {
-            iss: &team_id,
+            iss: team_id,
             iat: now,
         },
         &EncodingKey::from_ec_pem(auth_key_pem.as_bytes())?,
@@ -299,7 +303,7 @@ fn describe_error_chain(error: &dyn Error) -> String {
 fn load_fcm_service_account(
     settings: &Settings,
 ) -> Result<Option<FcmServiceAccount>, Box<dyn Error + Send + Sync>> {
-    let raw = match load_secret_value(&settings.fcm_service_account_key)? {
+    let raw = match load_secret_value(settings.fcm_service_account_key.as_deref())? {
         Some(value) => value,
         None => return Ok(None),
     };
@@ -363,8 +367,33 @@ fn resolve_apns_api_base_url_values(
     }
 }
 
-fn load_secret_value(raw: &Option<String>) -> Result<Option<String>, Box<dyn Error + Send + Sync>> {
-    let Some(raw) = raw.as_ref() else {
+fn resolve_apns_credentials<'a>(
+    topic: &str,
+    credentials: &'a HashMap<String, ApnsCredential>,
+    fallback_topic: Option<&str>,
+    fallback_key_id: Option<&'a str>,
+    fallback_team_id: Option<&'a str>,
+    fallback_auth_key: Option<&'a str>,
+) -> Option<(&'a str, &'a str, &'a str)> {
+    if let Some(credential) = credentials.get(topic) {
+        return Some((
+            trimmed_non_empty(Some(&credential.key_id))?,
+            trimmed_non_empty(Some(&credential.team_id))?,
+            trimmed_non_empty(Some(&credential.auth_key))?,
+        ));
+    }
+    if trimmed_non_empty(fallback_topic)? != topic {
+        return None;
+    }
+    Some((
+        trimmed_non_empty(fallback_key_id)?,
+        trimmed_non_empty(fallback_team_id)?,
+        trimmed_non_empty(fallback_auth_key)?,
+    ))
+}
+
+fn load_secret_value(raw: Option<&str>) -> Result<Option<String>, Box<dyn Error + Send + Sync>> {
+    let Some(raw) = raw else {
         return Ok(None);
     };
     let trimmed = raw.trim();
@@ -421,12 +450,14 @@ fn abbreviate_token(token: &str) -> String {
 mod tests {
     use super::{
         build_apns_request_body, compact_event_payload_for_apns, fcm_event_payload_json,
-        resolve_apns_api_base_url_values,
+        resolve_apns_api_base_url_values, resolve_apns_credentials,
     };
+    use crate::config::ApnsCredential;
     use crate::notifications::{EventDetails, EventPayload, NotificationPayload};
     use nostr_sdk::nostr::Event;
     use nostr_sdk::JsonUtil;
     use serde_json::json;
+    use std::collections::HashMap;
 
     fn sample_event_payload() -> EventPayload {
         EventPayload::Full(Box::new(
@@ -568,5 +599,55 @@ mod tests {
             ),
             "https://apns.test.invalid"
         );
+    }
+
+    #[test]
+    fn subscription_topic_selects_topic_specific_apns_credentials() {
+        let credentials = HashMap::from([(
+            "fi.siriusbusiness.irischat".to_string(),
+            ApnsCredential {
+                key_id: "chat-key".to_string(),
+                team_id: "chat-team".to_string(),
+                auth_key: "/run/secrets/chat-apns.p8".to_string(),
+            },
+        )]);
+
+        let selected = resolve_apns_credentials(
+            "fi.siriusbusiness.irischat",
+            &credentials,
+            Some("to.iris.chat"),
+            Some("legacy-key"),
+            Some("legacy-team"),
+            Some("/run/secrets/legacy-apns.p8"),
+        )
+        .expect("topic credentials");
+        assert_eq!(
+            selected,
+            ("chat-key", "chat-team", "/run/secrets/chat-apns.p8")
+        );
+
+        let fallback = resolve_apns_credentials(
+            "to.iris.chat",
+            &credentials,
+            Some("to.iris.chat"),
+            Some("legacy-key"),
+            Some("legacy-team"),
+            Some("/run/secrets/legacy-apns.p8"),
+        )
+        .expect("legacy credentials");
+        assert_eq!(
+            fallback,
+            ("legacy-key", "legacy-team", "/run/secrets/legacy-apns.p8")
+        );
+
+        assert!(resolve_apns_credentials(
+            "unconfigured.example.app",
+            &credentials,
+            Some("to.iris.chat"),
+            Some("legacy-key"),
+            Some("legacy-team"),
+            Some("/run/secrets/legacy-apns.p8"),
+        )
+        .is_none());
     }
 }
