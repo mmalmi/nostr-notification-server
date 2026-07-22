@@ -18,6 +18,10 @@ pub struct Subscription {
     #[serde(default)]
     pub apns_tokens: Vec<String>,
     #[serde(default)]
+    pub apns_topic: Option<String>,
+    #[serde(default)]
+    pub apns_environment: Option<String>,
+    #[serde(default)]
     pub social_graph_filter: bool,
     pub filter: SubscriptionFilter,
     #[serde(default)]
@@ -97,6 +101,8 @@ impl Subscription {
             web_push_subscriptions,
             fcm_tokens: Vec::new(),
             apns_tokens: Vec::new(),
+            apns_topic: None,
+            apns_environment: None,
             social_graph_filter: false,
             filter,
             filters: Vec::new(),
@@ -144,6 +150,20 @@ impl Subscription {
                 self.apns_tokens.push(token);
             }
         }
+        if other
+            .apns_topic
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+        {
+            self.apns_topic = other.apns_topic;
+        }
+        if other
+            .apns_environment
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+        {
+            self.apns_environment = other.apns_environment;
+        }
     }
 
     pub fn matches_event_filter_only(
@@ -189,6 +209,8 @@ mod tests {
             web_push_subscriptions: Vec::new(),
             fcm_tokens: vec!["token".to_string()],
             apns_tokens: Vec::new(),
+            apns_topic: None,
+            apns_environment: None,
             social_graph_filter: false,
             filter: filter(
                 Some(vec![message_keys.public_key().to_hex()]),

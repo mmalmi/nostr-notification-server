@@ -699,14 +699,22 @@ pub async fn send_notifications(
 
         let payload = payload.clone();
         let settings = settings.clone();
+        let apns_topic = subscription.apns_topic.clone();
+        let apns_environment = subscription.apns_environment.clone();
         tasks.push(tokio::spawn(async move {
-            send_apns_push(&apns_token, &payload, &settings)
-                .await
-                .map(|should_remove| NotificationTargetRemoval {
-                    web_push_endpoint: None,
-                    fcm_token: None,
-                    apns_token: should_remove.then_some(apns_token),
-                })
+            send_apns_push(
+                &apns_token,
+                &payload,
+                &settings,
+                apns_topic.as_deref(),
+                apns_environment.as_deref(),
+            )
+            .await
+            .map(|should_remove| NotificationTargetRemoval {
+                web_push_endpoint: None,
+                fcm_token: None,
+                apns_token: should_remove.then_some(apns_token),
+            })
         }));
     }
 
@@ -948,6 +956,8 @@ mod tests {
             web_push_subscriptions: Vec::new(),
             fcm_tokens: Vec::new(),
             apns_tokens: Vec::new(),
+            apns_topic: None,
+            apns_environment: None,
             social_graph_filter: false,
             filter: filter(Some(vec![sender.clone()]), Some(vec![1]), tags),
             filters: Vec::new(),

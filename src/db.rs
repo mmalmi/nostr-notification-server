@@ -1228,6 +1228,8 @@ mod tests {
             web_push_subscriptions: Vec::new(),
             fcm_tokens: vec!["token".to_string()],
             apns_tokens: Vec::new(),
+            apns_topic: None,
+            apns_environment: None,
             social_graph_filter: false,
             filter: filter(
                 Some(vec![author.clone()]),

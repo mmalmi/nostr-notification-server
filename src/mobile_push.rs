@@ -103,6 +103,8 @@ pub async fn send_apns_push(
     token: &str,
     payload: &NotificationPayload,
     settings: &Settings,
+    subscription_topic: Option<&str>,
+    subscription_environment: Option<&str>,
 ) -> Result<bool, Box<dyn Error + Send + Sync>> {
     let key_id = match trimmed_non_empty(settings.apns_key_id.as_deref()) {
         Some(value) => value.to_string(),
@@ -112,7 +114,9 @@ pub async fn send_apns_push(
         Some(value) => value.to_string(),
         None => return Ok(false),
     };
-    let topic = match trimmed_non_empty(settings.apns_topic.as_deref()) {
+    let topic = match trimmed_non_empty(subscription_topic)
+        .or_else(|| trimmed_non_empty(settings.apns_topic.as_deref()))
+    {
         Some(value) => value.to_string(),
         None => return Ok(false),
     };
@@ -137,7 +141,11 @@ pub async fn send_apns_push(
     let request_body_bytes = serde_json::to_vec(&request_body)?;
     let payload_size = request_body_bytes.len();
 
-    let base_url = resolve_apns_api_base_url(settings);
+    let base_url = resolve_apns_api_base_url_values(
+        &settings.apns_api_base_url,
+        &settings.apns_environment,
+        subscription_environment,
+    );
     let parsed_base_url = reqwest::Url::parse(&base_url)?;
     let endpoint = format!("{}/3/device/{}", base_url.trim_end_matches('/'), token);
     let host = parsed_base_url
@@ -334,18 +342,23 @@ async fn fetch_fcm_access_token(
     Ok(token.access_token)
 }
 
-fn resolve_apns_api_base_url(settings: &Settings) -> String {
-    let configured = settings.apns_api_base_url.trim();
+fn resolve_apns_api_base_url_values(
+    configured_base_url: &str,
+    configured_environment: &str,
+    subscription_environment: Option<&str>,
+) -> String {
+    let configured = configured_base_url.trim();
     if !configured.is_empty() {
         return configured.to_string();
     }
-    match settings
-        .apns_environment
+    match subscription_environment
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(configured_environment)
         .trim()
         .to_ascii_lowercase()
         .as_str()
     {
-        "sandbox" => "https://api.sandbox.push.apple.com".to_string(),
+        "development" | "sandbox" => "https://api.sandbox.push.apple.com".to_string(),
         _ => "https://api.push.apple.com".to_string(),
     }
 }
@@ -406,7 +419,10 @@ fn abbreviate_token(token: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_apns_request_body, compact_event_payload_for_apns, fcm_event_payload_json};
+    use super::{
+        build_apns_request_body, compact_event_payload_for_apns, fcm_event_payload_json,
+        resolve_apns_api_base_url_values,
+    };
     use crate::notifications::{EventDetails, EventPayload, NotificationPayload};
     use nostr_sdk::nostr::Event;
     use nostr_sdk::JsonUtil;
@@ -532,5 +548,25 @@ mod tests {
         assert_eq!(event["created_at"].as_u64().unwrap(), 1_700_000_000);
         assert_eq!(event["content"].as_str().unwrap(), "encrypted rumor");
         assert_eq!(event["sig"].as_str().unwrap().len(), 128);
+    }
+
+    #[test]
+    fn subscription_environment_selects_the_matching_apns_service() {
+        assert_eq!(
+            resolve_apns_api_base_url_values("", "production", Some("development")),
+            "https://api.sandbox.push.apple.com"
+        );
+        assert_eq!(
+            resolve_apns_api_base_url_values("", "sandbox", Some("production")),
+            "https://api.push.apple.com"
+        );
+        assert_eq!(
+            resolve_apns_api_base_url_values(
+                "https://apns.test.invalid",
+                "production",
+                Some("development")
+            ),
+            "https://apns.test.invalid"
+        );
     }
 }
