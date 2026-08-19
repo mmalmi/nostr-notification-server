@@ -126,18 +126,29 @@ fn subscription_allows_event(
         return Ok(false);
     }
 
-    if !subscription.social_graph_filter {
+    if event.kind == Kind::EncryptedDirectMessage
+        || event.kind == Kind::PrivateDirectMessage
+        || event.kind == Kind::GiftWrap
+        || event.kind.as_u16() == 1060
+    {
         return Ok(true);
     }
 
-    let in_social_graph = db_handler.is_pubkey_in_social_graph(&sender_pubkey)?;
-    if !in_social_graph {
+    let enforce_graph_visibility = subscription.social_graph_filter
+        || db_handler.is_social_graph_root(&subscription.subscriber)?;
+    if !enforce_graph_visibility {
+        return Ok(true);
+    }
+
+    let is_visible =
+        db_handler.is_notification_author_visible(&subscription.subscriber, &sender_pubkey)?;
+    if !is_visible {
         debug!(
-            "Skipping notification for subscription {} because {} is outside the social graph",
+            "Skipping notification for subscription {} because {} is unknown or overmuted",
             subscription.subscriber, sender_pubkey
         );
     }
-    Ok(in_social_graph)
+    Ok(is_visible)
 }
 
 fn get_event_type(event: &Event, db_handler: &Arc<DbHandler>, pubkey: &str) -> String {
@@ -979,6 +990,174 @@ mod tests {
             1,
             "same subscription should be delivered once per event"
         );
+
+        std::fs::remove_dir_all(db_path).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn root_public_notification_uses_graph_policy_when_legacy_toggle_is_false(
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let unique = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let db_path = std::env::temp_dir()
+            .join(format!("nostr-notification-server-test-{unique}"))
+            .to_string_lossy()
+            .to_string();
+        let settings = test_settings(db_path.clone());
+        let db_handler = Arc::new(DbHandler::new(&settings)?);
+        let root = db_handler.social_graph.get_root()?;
+        let sender_keys = Keys::generate();
+        let mut tags = BTreeMap::new();
+        tags.insert("#p".to_string(), vec![root.clone()]);
+        let subscription = Subscription {
+            webhooks: vec!["https://example.invalid/hook".to_string()],
+            web_push_subscriptions: Vec::new(),
+            fcm_tokens: Vec::new(),
+            apns_tokens: Vec::new(),
+            apns_topic: None,
+            apns_environment: None,
+            social_graph_filter: false,
+            filter: filter(None, Some(vec![1]), tags),
+            filters: Vec::new(),
+            subscriber: root.clone(),
+        };
+        db_handler.save_subscription(&root, "root-public", &subscription)?;
+        let root_key = PublicKey::from_hex(&root)?;
+        let event = EventBuilder::new(Kind::TextNote, "unsolicited", [Tag::public_key(root_key)])
+            .to_event(&sender_keys)?;
+
+        assert!(collect_notification_jobs(&event, &db_handler, &settings)?.is_empty());
+
+        std::fs::remove_dir_all(db_path).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn non_root_public_notification_preserves_legacy_false_toggle(
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let unique = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let db_path = std::env::temp_dir()
+            .join(format!("nostr-notification-server-test-{unique}"))
+            .to_string_lossy()
+            .to_string();
+        let settings = test_settings(db_path.clone());
+        let db_handler = Arc::new(DbHandler::new(&settings)?);
+        let subscriber_keys = Keys::generate();
+        let subscriber = subscriber_keys.public_key().to_hex();
+        let sender_keys = Keys::generate();
+        let mut tags = BTreeMap::new();
+        tags.insert("#p".to_string(), vec![subscriber.clone()]);
+        let subscription = Subscription {
+            webhooks: vec!["https://example.invalid/hook".to_string()],
+            web_push_subscriptions: Vec::new(),
+            fcm_tokens: Vec::new(),
+            apns_tokens: Vec::new(),
+            apns_topic: None,
+            apns_environment: None,
+            social_graph_filter: false,
+            filter: filter(None, Some(vec![1]), tags),
+            filters: Vec::new(),
+            subscriber: subscriber.clone(),
+        };
+        db_handler.save_subscription(&subscriber, "non-root-public", &subscription)?;
+        let event = EventBuilder::new(
+            Kind::TextNote,
+            "legacy opt-out",
+            [Tag::public_key(subscriber_keys.public_key())],
+        )
+        .to_event(&sender_keys)?;
+
+        assert_eq!(
+            collect_notification_jobs(&event, &db_handler, &settings)?.len(),
+            1
+        );
+
+        std::fs::remove_dir_all(db_path).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn encrypted_notification_kinds_bypass_graph_visibility(
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let unique = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let db_path = std::env::temp_dir()
+            .join(format!("nostr-notification-server-test-{unique}"))
+            .to_string_lossy()
+            .to_string();
+        let settings = test_settings(db_path.clone());
+        let db_handler = Arc::new(DbHandler::new(&settings)?);
+        let root = db_handler.social_graph.get_root()?;
+
+        for kind in [4_u16, 14, 1059, 1060] {
+            let sender_keys = Keys::generate();
+            let sender = sender_keys.public_key().to_hex();
+            let subscription = Subscription {
+                webhooks: vec!["https://example.invalid/hook".to_string()],
+                web_push_subscriptions: Vec::new(),
+                fcm_tokens: Vec::new(),
+                apns_tokens: Vec::new(),
+                apns_topic: None,
+                apns_environment: None,
+                social_graph_filter: true,
+                filter: filter(Some(vec![sender]), Some(vec![kind]), BTreeMap::new()),
+                filters: Vec::new(),
+                subscriber: root.clone(),
+            };
+            let subscription_id = format!("encrypted-{kind}");
+            db_handler.save_subscription(&root, &subscription_id, &subscription)?;
+            let event =
+                EventBuilder::new(Kind::from(kind), "ciphertext", []).to_event(&sender_keys)?;
+
+            assert_eq!(
+                collect_notification_jobs(&event, &db_handler, &settings)?.len(),
+                1,
+                "encrypted kind {kind} must not depend on public graph visibility"
+            );
+        }
+
+        std::fs::remove_dir_all(db_path).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn encrypted_notifications_still_honor_direct_recipient_mutes(
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let unique = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let db_path = std::env::temp_dir()
+            .join(format!("nostr-notification-server-test-{unique}"))
+            .to_string_lossy()
+            .to_string();
+        let subscriber_keys = Keys::generate();
+        let sender_keys = Keys::generate();
+        let subscriber = subscriber_keys.public_key().to_hex();
+        let sender = sender_keys.public_key().to_hex();
+        let mut settings = test_settings(db_path.clone());
+        settings.social_graph_root_pubkey = subscriber.clone();
+        let db_handler = Arc::new(DbHandler::new(&settings)?);
+        let mute_event = EventBuilder::new(
+            Kind::from(10_000),
+            "",
+            [Tag::public_key(sender_keys.public_key())],
+        )
+        .to_event(&subscriber_keys)?;
+        db_handler.handle_mute_list_event(&mute_event)?;
+
+        let subscription = Subscription {
+            webhooks: vec!["https://example.invalid/hook".to_string()],
+            web_push_subscriptions: Vec::new(),
+            fcm_tokens: Vec::new(),
+            apns_tokens: Vec::new(),
+            apns_topic: None,
+            apns_environment: None,
+            social_graph_filter: false,
+            filter: filter(Some(vec![sender]), Some(vec![1060]), BTreeMap::new()),
+            filters: Vec::new(),
+            subscriber: subscriber.clone(),
+        };
+        db_handler.save_subscription(&subscriber, "muted-encrypted", &subscription)?;
+        let event = EventBuilder::new(Kind::from(1060), "ciphertext", []).to_event(&sender_keys)?;
+
+        assert!(collect_notification_jobs(&event, &db_handler, &settings)?.is_empty());
 
         std::fs::remove_dir_all(db_path).ok();
         Ok(())

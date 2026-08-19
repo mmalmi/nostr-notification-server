@@ -145,16 +145,8 @@ impl DbHandler {
             .social_graph_snapshot_path
             .as_deref()
             .filter(|path| !path.trim().is_empty())
-            .and_then(|path| match ExternalSocialGraph::open(path, &root_hex) {
-                Ok(graph) => Some(graph),
-                Err(error) => {
-                    warn!(
-                        "Failed to open external social graph at {}: {}. Falling back to local graph state.",
-                        path, error
-                    );
-                    None
-                }
-            });
+            .map(|path| ExternalSocialGraph::open(path, &root_hex))
+            .transpose()?;
 
         let handler = Self {
             env: environment,
@@ -932,12 +924,77 @@ impl DbHandler {
         pubkey: &str,
     ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
         if let Some(external_social_graph) = &self.external_social_graph {
-            if external_social_graph.is_pubkey_in_graph(pubkey)? {
-                return Ok(true);
-            }
+            return external_social_graph.is_pubkey_in_graph(pubkey);
         }
 
         Ok(self.social_graph.get_follow_distance(pubkey)? < 1000)
+    }
+
+    pub fn is_social_graph_root(
+        &self,
+        pubkey: &str,
+    ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(self.social_graph.get_root()? == pubkey)
+    }
+
+    pub fn is_notification_author_visible(
+        &self,
+        recipient: &str,
+        author: &str,
+    ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+        if self.recipient_has_muted_author(recipient, author)? {
+            return Ok(false);
+        }
+        if let Some(external_social_graph) = &self.external_social_graph {
+            return external_social_graph.is_author_visible(recipient, author);
+        }
+        if recipient == author
+            || self.social_graph.get_root()? == author
+            || self.social_graph.is_following(recipient, author)?
+        {
+            return Ok(true);
+        }
+        if self.social_graph.get_follow_distance(author)? >= 1000 {
+            return Ok(false);
+        }
+
+        let followers = self.social_graph.get_followers_by_user(author)?;
+        let rtxn = self.env.read_txn()?;
+        let mut muters = HashSet::new();
+        for entry in self.recipient_muted_pubkeys.iter(&rtxn)? {
+            let (muter, muted) = entry?;
+            if muted.contains(author) {
+                muters.insert(muter.to_string());
+            }
+        }
+        drop(rtxn);
+
+        let mut nearest_distance = 1000u32;
+        let mut nearest_followers = 0usize;
+        let mut nearest_muters = 0usize;
+        for (opinion_users, is_mute) in [(&followers, false), (&muters, true)] {
+            for opinion_user in opinion_users {
+                let distance = self.social_graph.get_follow_distance(opinion_user)?;
+                if distance >= 1000 {
+                    continue;
+                }
+                if distance < nearest_distance {
+                    nearest_distance = distance;
+                    nearest_followers = 0;
+                    nearest_muters = 0;
+                }
+                if distance != nearest_distance {
+                    continue;
+                }
+                if is_mute {
+                    nearest_muters += 1;
+                } else {
+                    nearest_followers += 1;
+                }
+            }
+        }
+
+        Ok(nearest_distance >= 1000 || nearest_muters.saturating_mul(3) <= nearest_followers)
     }
 
     pub fn should_send_push_target(
@@ -1246,6 +1303,95 @@ mod tests {
         assert_eq!(db.get_subscriptions_by_author(&author)?.len(), 1);
         assert_eq!(db.get_subscriptions_by_p_tag(&invite_recipient)?.len(), 1);
 
+        fs::remove_dir_all(db_path).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn configured_external_graph_failure_is_fatal() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let db_path = std::env::temp_dir()
+            .join(format!("nostr-notification-server-test-{unique}"))
+            .to_string_lossy()
+            .to_string();
+        let mut settings = test_settings(db_path.clone());
+        settings.social_graph_snapshot_path = Some(
+            std::env::temp_dir()
+                .join(format!("missing-social-graph-{unique}"))
+                .to_string_lossy()
+                .to_string(),
+        );
+
+        let result = DbHandler::new(&settings);
+        assert!(
+            result.is_err(),
+            "configured graph failures must fail closed"
+        );
+
+        fs::remove_dir_all(db_path).ok();
+    }
+
+    #[test]
+    fn configured_external_graph_is_authoritative_over_local_state(
+    ) -> Result<(), Box<dyn StdError + Send + Sync>> {
+        let unique = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let db_path = std::env::temp_dir().join(format!("nostr-notification-server-test-{unique}"));
+        let settings = test_settings(db_path.to_string_lossy().to_string());
+        let settings_root = settings.social_graph_root_pubkey.clone();
+        let mut db = DbHandler::new(&settings)?;
+        let mut binary = vec![2, 1];
+        for index in (0..settings_root.len()).step_by(2) {
+            binary.push(u8::from_str_radix(&settings_root[index..index + 2], 16)?);
+        }
+        binary.extend([1, 0, 0]);
+        db.external_social_graph = Some(ExternalSocialGraph::from_social_graph_binary(
+            &settings_root,
+            &binary,
+        )?);
+        let locally_known = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        db.social_graph
+            .add_follower(&settings_root, locally_known)?;
+
+        assert!(!db.is_pubkey_in_social_graph(locally_known)?);
+        assert!(!db.is_notification_author_visible(&settings_root, locally_known)?);
+
+        drop(db);
+        fs::remove_dir_all(db_path).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn local_policy_never_globally_overmutes_configured_root(
+    ) -> Result<(), Box<dyn StdError + Send + Sync>> {
+        let unique = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let db_path = std::env::temp_dir()
+            .join(format!("nostr-notification-server-test-{unique}"))
+            .to_string_lossy()
+            .to_string();
+        let settings = test_settings(db_path.clone());
+        let db = DbHandler::new(&settings)?;
+        let root = db.social_graph.get_root()?;
+        let muter_keys = nostr_sdk::Keys::generate();
+        let muter = muter_keys.public_key().to_hex();
+        let recipient = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        db.social_graph.add_follower(&root, &muter)?;
+        db.social_graph.add_follower(&root, recipient)?;
+        let mute_event = nostr_sdk::EventBuilder::new(
+            nostr_sdk::Kind::from(10_000),
+            "",
+            [nostr_sdk::Tag::public_key(nostr_sdk::PublicKey::from_hex(
+                &root,
+            )?)],
+        )
+        .to_event(&muter_keys)?;
+        db.handle_mute_list_event(&mute_event)?;
+
+        assert!(db.is_notification_author_visible(recipient, &root)?);
+
+        drop(db);
         fs::remove_dir_all(db_path).ok();
         Ok(())
     }

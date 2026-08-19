@@ -20,28 +20,22 @@ const UNKNOWN_FOLLOW_DISTANCE: u32 = 1000;
 
 const STR_TO_UNIQUE_ID_DB: &str = "str_to_unique_id";
 const FOLLOW_DISTANCE_BY_USER_DB: &str = "follow_distance_by_user";
+const FOLLOWED_BY_USER_DB: &str = "followed_by_user";
+const FOLLOWERS_BY_USER_DB: &str = "followers_by_user";
 const MUTED_BY_USER_DB: &str = "muted_by_user";
+const USER_MUTED_BY_DB: &str = "user_muted_by";
+const OVERMUTE_THRESHOLD: usize = 3;
 
 pub struct ExternalSocialGraph {
-    source: ExternalSocialGraphSource,
+    policy: VisibilityPolicy,
 }
 
-enum ExternalSocialGraphSource {
-    Lmdb(LmdbExternalSocialGraph),
-    Binary(BinaryExternalSocialGraph),
-}
-
-struct LmdbExternalSocialGraph {
-    env: Env,
-    str_to_unique_id: Database<Str, U32<BigEndian>>,
-    follow_distance_by_user: Database<U32<BigEndian>, U32<BigEndian>>,
-    muted_by_user: Database<U32<BigEndian>, SerdeBincode<Vec<u32>>>,
-}
-
-struct BinaryExternalSocialGraph {
+struct VisibilityPolicy {
     pubkey_to_id: HashMap<String, u32>,
     follow_distance_by_user: HashMap<u32, u32>,
+    followed_by_user: HashMap<u32, HashSet<u32>>,
     muted_by_user: HashMap<u32, HashSet<u32>>,
+    overmuted_users: HashSet<u32>,
 }
 
 #[derive(Debug)]
@@ -100,10 +94,10 @@ impl ExternalSocialGraph {
             return Err(format!("social graph path does not exist: {}", path.display()).into());
         }
 
-        open_read_only_graph_with_retries(path)
+        open_read_only_graph_with_retries(path, root_pubkey)
     }
 
-    fn from_env(env: Env) -> Result<Self, Box<dyn Error + Send + Sync>> {
+    fn from_env(env: Env, root_pubkey: &str) -> Result<Self, Box<dyn Error + Send + Sync>> {
         let rtxn = env.read_txn().map_err(|error| {
             let info = env.info();
             ExternalSocialGraphOpenError::boxed(
@@ -122,7 +116,7 @@ impl ExternalSocialGraph {
                         error,
                     )
                 })?;
-        let follow_distance_by_user = open_required_database::<U32<BigEndian>, U32<BigEndian>>(
+        let _follow_distance_by_user = open_required_database::<U32<BigEndian>, U32<BigEndian>>(
             &env,
             &rtxn,
             FOLLOW_DISTANCE_BY_USER_DB,
@@ -130,6 +124,28 @@ impl ExternalSocialGraph {
         .map_err(|error| {
             ExternalSocialGraphOpenError::boxed_source(
                 format!("open {FOLLOW_DISTANCE_BY_USER_DB} database"),
+                error,
+            )
+        })?;
+        let followed_by_user = open_required_database::<U32<BigEndian>, SerdeBincode<Vec<u32>>>(
+            &env,
+            &rtxn,
+            FOLLOWED_BY_USER_DB,
+        )
+        .map_err(|error| {
+            ExternalSocialGraphOpenError::boxed_source(
+                format!("open {FOLLOWED_BY_USER_DB} database"),
+                error,
+            )
+        })?;
+        let followers_by_user = open_required_database::<U32<BigEndian>, SerdeBincode<Vec<u32>>>(
+            &env,
+            &rtxn,
+            FOLLOWERS_BY_USER_DB,
+        )
+        .map_err(|error| {
+            ExternalSocialGraphOpenError::boxed_source(
+                format!("open {FOLLOWERS_BY_USER_DB} database"),
                 error,
             )
         })?;
@@ -144,37 +160,49 @@ impl ExternalSocialGraph {
                 error,
             )
         })?;
+        let user_muted_by = open_required_database::<U32<BigEndian>, SerdeBincode<Vec<u32>>>(
+            &env,
+            &rtxn,
+            USER_MUTED_BY_DB,
+        )
+        .map_err(|error| {
+            ExternalSocialGraphOpenError::boxed_source(
+                format!("open {USER_MUTED_BY_DB} database"),
+                error,
+            )
+        })?;
+
+        let root_id = str_to_unique_id
+            .get(&rtxn, root_pubkey)?
+            .ok_or("external social graph does not contain the configured root")?;
+        if _follow_distance_by_user.get(&rtxn, &root_id)? != Some(0) {
+            return Err("external social graph root does not match the configured root".into());
+        }
+
+        let pubkey_to_id = str_to_unique_id
+            .iter(&rtxn)?
+            .map(|entry| entry.map(|(pubkey, id)| (pubkey.to_string(), id)))
+            .collect::<Result<HashMap<_, _>, _>>()?;
+        let followed_by_user = collect_id_sets(&followed_by_user, &rtxn)?;
+        let followers_by_user = collect_id_sets(&followers_by_user, &rtxn)?;
+        let muted_by_user = collect_id_sets(&muted_by_user, &rtxn)?;
+        let user_muted_by = collect_id_sets(&user_muted_by, &rtxn)?;
         drop(rtxn);
 
         Ok(Self {
-            source: ExternalSocialGraphSource::Lmdb(LmdbExternalSocialGraph {
-                env,
-                str_to_unique_id,
-                follow_distance_by_user,
+            policy: VisibilityPolicy::new(
+                root_pubkey,
+                pubkey_to_id,
+                followed_by_user,
+                followers_by_user,
                 muted_by_user,
-            }),
+                user_muted_by,
+            )?,
         })
     }
 
     pub fn is_pubkey_in_graph(&self, pubkey: &str) -> Result<bool, Box<dyn Error + Send + Sync>> {
-        match &self.source {
-            ExternalSocialGraphSource::Lmdb(graph) => {
-                let rtxn = graph.env.read_txn()?;
-                let Some(pubkey_id) = graph.str_to_unique_id.get(&rtxn, pubkey)? else {
-                    return Ok(false);
-                };
-
-                Ok(graph
-                    .follow_distance_by_user
-                    .get(&rtxn, &pubkey_id)?
-                    .is_some_and(|distance| distance < UNKNOWN_FOLLOW_DISTANCE))
-            }
-            ExternalSocialGraphSource::Binary(graph) => Ok(graph
-                .pubkey_to_id
-                .get(pubkey)
-                .and_then(|pubkey_id| graph.follow_distance_by_user.get(pubkey_id))
-                .is_some_and(|distance| *distance < UNKNOWN_FOLLOW_DISTANCE)),
-        }
+        Ok(self.policy.is_pubkey_in_graph(pubkey))
     }
 
     pub fn recipient_has_muted_author(
@@ -182,35 +210,15 @@ impl ExternalSocialGraph {
         recipient: &str,
         author: &str,
     ) -> Result<bool, Box<dyn Error + Send + Sync>> {
-        match &self.source {
-            ExternalSocialGraphSource::Lmdb(graph) => {
-                let rtxn = graph.env.read_txn()?;
-                let Some(recipient_id) = graph.str_to_unique_id.get(&rtxn, recipient)? else {
-                    return Ok(false);
-                };
-                let Some(author_id) = graph.str_to_unique_id.get(&rtxn, author)? else {
-                    return Ok(false);
-                };
+        Ok(self.policy.recipient_has_muted_author(recipient, author))
+    }
 
-                Ok(graph
-                    .muted_by_user
-                    .get(&rtxn, &recipient_id)?
-                    .is_some_and(|muted| muted.contains(&author_id)))
-            }
-            ExternalSocialGraphSource::Binary(graph) => {
-                let Some(recipient_id) = graph.pubkey_to_id.get(recipient) else {
-                    return Ok(false);
-                };
-                let Some(author_id) = graph.pubkey_to_id.get(author) else {
-                    return Ok(false);
-                };
-
-                Ok(graph
-                    .muted_by_user
-                    .get(recipient_id)
-                    .is_some_and(|muted| muted.contains(author_id)))
-            }
-        }
+    pub fn is_author_visible(
+        &self,
+        recipient: &str,
+        author: &str,
+    ) -> Result<bool, Box<dyn Error + Send + Sync>> {
+        Ok(self.policy.is_author_visible(recipient, author))
     }
 
     fn from_social_graph_url(
@@ -221,22 +229,169 @@ impl ExternalSocialGraph {
         Self::from_social_graph_binary(root_pubkey, &bytes)
     }
 
-    fn from_social_graph_binary(
+    pub(crate) fn from_social_graph_binary(
         root_pubkey: &str,
         data: &[u8],
     ) -> Result<Self, Box<dyn Error + Send + Sync>> {
         let snapshot = parse_social_graph_binary(root_pubkey, data)?;
+        Ok(Self { policy: snapshot })
+    }
+}
+
+impl VisibilityPolicy {
+    fn new(
+        root_pubkey: &str,
+        pubkey_to_id: HashMap<String, u32>,
+        followed_by_user: HashMap<u32, HashSet<u32>>,
+        followers_by_user: HashMap<u32, HashSet<u32>>,
+        muted_by_user: HashMap<u32, HashSet<u32>>,
+        user_muted_by: HashMap<u32, HashSet<u32>>,
+    ) -> Result<Self, Box<dyn Error + Send + Sync>> {
+        let root_id = *pubkey_to_id
+            .get(root_pubkey)
+            .ok_or("social graph does not contain the configured root")?;
+        let follow_distance_by_user = calculate_follow_distances(root_id, &followed_by_user);
+        let mut overmuted_users = calculate_overmuted_users(
+            &pubkey_to_id,
+            &follow_distance_by_user,
+            &followers_by_user,
+            &user_muted_by,
+        );
+        overmuted_users.remove(&root_id);
+
         Ok(Self {
-            source: ExternalSocialGraphSource::Binary(snapshot),
+            pubkey_to_id,
+            follow_distance_by_user,
+            followed_by_user,
+            muted_by_user,
+            overmuted_users,
         })
     }
+
+    fn is_pubkey_in_graph(&self, pubkey: &str) -> bool {
+        self.pubkey_to_id
+            .get(pubkey)
+            .and_then(|pubkey_id| self.follow_distance_by_user.get(pubkey_id))
+            .is_some_and(|distance| *distance < UNKNOWN_FOLLOW_DISTANCE)
+    }
+
+    fn recipient_has_muted_author(&self, recipient: &str, author: &str) -> bool {
+        let Some(recipient_id) = self.pubkey_to_id.get(recipient) else {
+            return false;
+        };
+        let Some(author_id) = self.pubkey_to_id.get(author) else {
+            return false;
+        };
+
+        self.muted_by_user
+            .get(recipient_id)
+            .is_some_and(|muted| muted.contains(author_id))
+    }
+
+    fn is_author_visible(&self, recipient: &str, author: &str) -> bool {
+        if self.recipient_has_muted_author(recipient, author) {
+            return false;
+        }
+        if recipient == author {
+            return true;
+        }
+
+        let Some(author_id) = self.pubkey_to_id.get(author) else {
+            return false;
+        };
+        if self
+            .pubkey_to_id
+            .get(recipient)
+            .and_then(|recipient_id| self.followed_by_user.get(recipient_id))
+            .is_some_and(|followed| followed.contains(author_id))
+        {
+            return true;
+        }
+
+        self.follow_distance_by_user
+            .get(author_id)
+            .is_some_and(|distance| *distance < UNKNOWN_FOLLOW_DISTANCE)
+            && !self.overmuted_users.contains(author_id)
+    }
+}
+
+fn collect_id_sets(
+    database: &Database<U32<BigEndian>, SerdeBincode<Vec<u32>>>,
+    rtxn: &RoTxn<'_>,
+) -> Result<HashMap<u32, HashSet<u32>>, Box<dyn Error + Send + Sync>> {
+    Ok(database
+        .iter(rtxn)?
+        .map(|entry| entry.map(|(owner, values)| (owner, values.into_iter().collect())))
+        .collect::<Result<HashMap<_, _>, _>>()?)
+}
+
+fn invert_edges(edges_by_owner: &HashMap<u32, HashSet<u32>>) -> HashMap<u32, HashSet<u32>> {
+    let mut owners_by_target: HashMap<u32, HashSet<u32>> = HashMap::new();
+    for (owner, targets) in edges_by_owner {
+        for target in targets {
+            owners_by_target.entry(*target).or_default().insert(*owner);
+        }
+    }
+    owners_by_target
+}
+
+fn calculate_overmuted_users(
+    pubkey_to_id: &HashMap<String, u32>,
+    follow_distance_by_user: &HashMap<u32, u32>,
+    followers_by_user: &HashMap<u32, HashSet<u32>>,
+    user_muted_by: &HashMap<u32, HashSet<u32>>,
+) -> HashSet<u32> {
+    let mut overmuted = HashSet::new();
+    for target in pubkey_to_id.values() {
+        let mut nearest_distance = UNKNOWN_FOLLOW_DISTANCE;
+        let mut nearest_followers = 0usize;
+        let mut nearest_muters = 0usize;
+
+        let mut record_opinion = |opinion_user: &u32, is_mute: bool| {
+            let distance = follow_distance_by_user
+                .get(opinion_user)
+                .copied()
+                .unwrap_or(UNKNOWN_FOLLOW_DISTANCE);
+            if distance >= UNKNOWN_FOLLOW_DISTANCE {
+                return;
+            }
+            if distance < nearest_distance {
+                nearest_distance = distance;
+                nearest_followers = 0;
+                nearest_muters = 0;
+            }
+            if distance != nearest_distance {
+                return;
+            }
+            if is_mute {
+                nearest_muters += 1;
+            } else {
+                nearest_followers += 1;
+            }
+        };
+
+        for follower in followers_by_user.get(target).into_iter().flatten() {
+            record_opinion(follower, false);
+        }
+        for muter in user_muted_by.get(target).into_iter().flatten() {
+            record_opinion(muter, true);
+        }
+
+        if nearest_distance < UNKNOWN_FOLLOW_DISTANCE
+            && nearest_muters.saturating_mul(OVERMUTE_THRESHOLD) > nearest_followers
+        {
+            overmuted.insert(*target);
+        }
+    }
+    overmuted
 }
 
 fn open_read_only_graph_with_retries(
     path: &Path,
+    root_pubkey: &str,
 ) -> Result<ExternalSocialGraph, Box<dyn Error + Send + Sync>> {
     for attempt in 0..=OPEN_RETRY_ATTEMPTS {
-        match open_read_only_graph(path) {
+        match open_read_only_graph(path, root_pubkey) {
             Ok(graph) => return Ok(graph),
             Err(error)
                 if is_temporary_resource_error(error.as_ref()) && attempt < OPEN_RETRY_ATTEMPTS =>
@@ -247,10 +402,13 @@ fn open_read_only_graph_with_retries(
         }
     }
 
-    open_read_only_graph(path)
+    open_read_only_graph(path, root_pubkey)
 }
 
-fn open_read_only_graph(path: &Path) -> Result<ExternalSocialGraph, Box<dyn Error + Send + Sync>> {
+fn open_read_only_graph(
+    path: &Path,
+    root_pubkey: &str,
+) -> Result<ExternalSocialGraph, Box<dyn Error + Send + Sync>> {
     let env = open_read_only_env(path)
         .map_err(|error| ExternalSocialGraphOpenError::boxed("open read-only LMDB env", error))?;
     env.clear_stale_readers().map_err(|error| {
@@ -263,7 +421,7 @@ fn open_read_only_graph(path: &Path) -> Result<ExternalSocialGraph, Box<dyn Erro
             error,
         )
     })?;
-    ExternalSocialGraph::from_env(env)
+    ExternalSocialGraph::from_env(env, root_pubkey)
 }
 
 fn open_read_only_env(path: &Path) -> Result<Env, HeedError> {
@@ -313,7 +471,7 @@ where
 fn parse_social_graph_binary(
     root_pubkey: &str,
     data: &[u8],
-) -> Result<BinaryExternalSocialGraph, Box<dyn Error + Send + Sync>> {
+) -> Result<VisibilityPolicy, Box<dyn Error + Send + Sync>> {
     let mut offset = 0usize;
     let version = read_varint(data, &mut offset)?;
     if version != SOCIAL_GRAPH_BINARY_FORMAT_VERSION {
@@ -339,9 +497,9 @@ fn parse_social_graph_binary(
         let _created_at = read_varint(data, &mut offset)?;
         let followed_count = usize::try_from(read_varint(data, &mut offset)?)
             .map_err(|_| "social graph follow count does not fit in memory")?;
-        let mut followed = Vec::with_capacity(followed_count);
+        let mut followed = HashSet::with_capacity(followed_count);
         for _ in 0..followed_count {
-            followed.push(
+            followed.insert(
                 u32::try_from(read_varint(data, &mut offset)?)
                     .map_err(|_| "social graph followed id exceeds u32")?,
             );
@@ -372,21 +530,21 @@ fn parse_social_graph_binary(
         return Err("social graph binary has trailing bytes".into());
     }
 
-    let root_id = *pubkey_to_id
-        .get(root_pubkey)
-        .ok_or("social graph binary does not contain the configured root")?;
-    let follow_distance_by_user = calculate_follow_distances(root_id, &followed_by_user);
-
-    Ok(BinaryExternalSocialGraph {
+    let followers_by_user = invert_edges(&followed_by_user);
+    let user_muted_by = invert_edges(&muted_by_user);
+    VisibilityPolicy::new(
+        root_pubkey,
         pubkey_to_id,
-        follow_distance_by_user,
+        followed_by_user,
+        followers_by_user,
         muted_by_user,
-    })
+        user_muted_by,
+    )
 }
 
 fn calculate_follow_distances(
     root_id: u32,
-    followed_by_user: &HashMap<u32, Vec<u32>>,
+    followed_by_user: &HashMap<u32, HashSet<u32>>,
 ) -> HashMap<u32, u32> {
     let mut distances: HashMap<u32, u32> = HashMap::new();
     distances.insert(root_id, 0);
@@ -569,46 +727,20 @@ mod tests {
             std::env::temp_dir().join(format!("nns-external-social-graph-test-{}", Uuid::new_v4()));
         fs::create_dir_all(&path).unwrap();
 
-        let env = unsafe {
-            EnvOpenOptions::new()
-                .map_size(TEST_MAP_SIZE)
-                .max_dbs(MAX_DBS)
-                .open(&path)
-                .unwrap()
-        };
+        let env = write_lmdb_snapshot(
+            &path,
+            &[
+                ("recipient", 1),
+                ("allowed", 2),
+                ("muted", 3),
+                ("distant", 4),
+            ],
+            1,
+            &[(1, &[2]), (2, &[3])],
+            &[(1, &[3])],
+        );
 
-        {
-            let mut wtxn = env.write_txn().unwrap();
-            let str_to_unique_id = env
-                .create_database::<Str, U32<BigEndian>>(&mut wtxn, Some(STR_TO_UNIQUE_ID_DB))
-                .unwrap();
-            let follow_distance_by_user = env
-                .create_database::<U32<BigEndian>, U32<BigEndian>>(
-                    &mut wtxn,
-                    Some(FOLLOW_DISTANCE_BY_USER_DB),
-                )
-                .unwrap();
-            let muted_by_user = env
-                .create_database::<U32<BigEndian>, SerdeBincode<Vec<u32>>>(
-                    &mut wtxn,
-                    Some(MUTED_BY_USER_DB),
-                )
-                .unwrap();
-
-            str_to_unique_id.put(&mut wtxn, "recipient", &1).unwrap();
-            str_to_unique_id.put(&mut wtxn, "allowed", &2).unwrap();
-            str_to_unique_id.put(&mut wtxn, "muted", &3).unwrap();
-            str_to_unique_id.put(&mut wtxn, "distant", &4).unwrap();
-
-            follow_distance_by_user.put(&mut wtxn, &2, &1).unwrap();
-            follow_distance_by_user.put(&mut wtxn, &3, &2).unwrap();
-            follow_distance_by_user.put(&mut wtxn, &4, &1000).unwrap();
-
-            muted_by_user.put(&mut wtxn, &1, &vec![3]).unwrap();
-            wtxn.commit().unwrap();
-        }
-
-        let graph = ExternalSocialGraph::from_env(env).unwrap();
+        let graph = ExternalSocialGraph::from_env(env, "recipient").unwrap();
 
         assert!(graph.is_pubkey_in_graph("allowed").unwrap());
         assert!(graph.is_pubkey_in_graph("muted").unwrap());
@@ -624,6 +756,28 @@ mod tests {
         assert!(!graph
             .recipient_has_muted_author("missing", "muted")
             .unwrap());
+        assert!(graph.is_author_visible("recipient", "allowed").unwrap());
+        assert!(!graph.is_author_visible("recipient", "muted").unwrap());
+
+        drop(graph);
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn lmdb_snapshot_precomputes_overmute_visibility() {
+        let path =
+            std::env::temp_dir().join(format!("nns-external-visibility-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&path).unwrap();
+        let env = write_lmdb_snapshot(
+            &path,
+            &[("root", 1), ("follower", 2), ("muter", 3), ("target", 4)],
+            1,
+            &[(1, &[2, 3]), (2, &[4])],
+            &[(3, &[4])],
+        );
+
+        let graph = ExternalSocialGraph::from_env(env, "root").unwrap();
+        assert!(!graph.is_author_visible("root", "target").unwrap());
 
         drop(graph);
         fs::remove_dir_all(path).unwrap();
@@ -677,6 +831,193 @@ mod tests {
             .unwrap());
     }
 
+    #[test]
+    fn blocks_one_near_muter_against_one_near_follower() {
+        let root = repeated_hex(1);
+        let follower = repeated_hex(2);
+        let muter = repeated_hex(3);
+        let target = repeated_hex(4);
+        let bytes = binary_snapshot(
+            &[&root, &follower, &muter, &target],
+            &[(1, &[2, 3]), (2, &[4])],
+            &[(3, &[4])],
+        );
+        let graph = ExternalSocialGraph::from_social_graph_binary(&root, &bytes).unwrap();
+
+        assert!(!graph.is_author_visible(&root, &target).unwrap());
+    }
+
+    #[test]
+    fn blocks_unknown_authors() {
+        let root = repeated_hex(1);
+        let known = repeated_hex(2);
+        let unreachable = repeated_hex(3);
+        let missing = repeated_hex(4);
+        let bytes = binary_snapshot(&[&root, &known, &unreachable], &[(1, &[2])], &[]);
+        let graph = ExternalSocialGraph::from_social_graph_binary(&root, &bytes).unwrap();
+
+        assert!(graph.is_author_visible(&root, &known).unwrap());
+        assert!(!graph.is_author_visible(&root, &unreachable).unwrap());
+        assert!(!graph.is_author_visible(&root, &missing).unwrap());
+    }
+
+    #[test]
+    fn preserves_self_and_direct_follows_unless_directly_muted() {
+        let root = repeated_hex(1);
+        let followed = repeated_hex(2);
+        let bytes = binary_snapshot(&[&root, &followed], &[(1, &[2])], &[]);
+        let graph = ExternalSocialGraph::from_social_graph_binary(&root, &bytes).unwrap();
+
+        assert!(graph.is_author_visible(&root, &root).unwrap());
+        assert!(graph.is_author_visible(&root, &followed).unwrap());
+
+        let muted_bytes = binary_snapshot(&[&root, &followed], &[(1, &[2])], &[(1, &[2])]);
+        let muted_graph =
+            ExternalSocialGraph::from_social_graph_binary(&root, &muted_bytes).unwrap();
+        assert!(!muted_graph.is_author_visible(&root, &followed).unwrap());
+    }
+
+    #[test]
+    fn recipient_direct_follow_bypasses_global_overmute() {
+        let root = repeated_hex(1);
+        let follower = repeated_hex(2);
+        let muter = repeated_hex(3);
+        let target = repeated_hex(4);
+        let recipient = repeated_hex(5);
+        let bytes = binary_snapshot(
+            &[&root, &follower, &muter, &target, &recipient],
+            &[(1, &[2, 3, 5]), (2, &[4]), (5, &[4])],
+            &[(3, &[4])],
+        );
+        let graph = ExternalSocialGraph::from_social_graph_binary(&root, &bytes).unwrap();
+
+        assert!(!graph.is_author_visible(&root, &target).unwrap());
+        assert!(graph.is_author_visible(&recipient, &target).unwrap());
+    }
+
+    #[test]
+    fn configured_root_is_never_globally_overmuted() {
+        let root = repeated_hex(1);
+        let muter = repeated_hex(2);
+        let recipient = repeated_hex(3);
+        let bytes = binary_snapshot(&[&root, &muter, &recipient], &[(1, &[2, 3])], &[(2, &[1])]);
+        let graph = ExternalSocialGraph::from_social_graph_binary(&root, &bytes).unwrap();
+
+        assert!(graph.is_author_visible(&recipient, &root).unwrap());
+    }
+
+    #[test]
+    fn ignores_farther_mutes_when_a_nearer_follow_opinion_exists() {
+        let root = repeated_hex(1);
+        let near_follower = repeated_hex(2);
+        let bridge = repeated_hex(3);
+        let far_muter = repeated_hex(4);
+        let target = repeated_hex(5);
+        let bytes = binary_snapshot(
+            &[&root, &near_follower, &bridge, &far_muter, &target],
+            &[(1, &[2, 3]), (2, &[5]), (3, &[4])],
+            &[(4, &[5])],
+        );
+        let graph = ExternalSocialGraph::from_social_graph_binary(&root, &bytes).unwrap();
+
+        assert!(graph.is_author_visible(&root, &target).unwrap());
+    }
+
+    fn write_lmdb_snapshot(
+        path: &Path,
+        pubkeys: &[(&str, u32)],
+        root_id: u32,
+        follows: &[(u32, &[u32])],
+        mutes: &[(u32, &[u32])],
+    ) -> Env {
+        let env = unsafe {
+            EnvOpenOptions::new()
+                .map_size(TEST_MAP_SIZE)
+                .max_dbs(MAX_DBS)
+                .open(path)
+                .unwrap()
+        };
+        let followed_sets: HashMap<u32, HashSet<u32>> = follows
+            .iter()
+            .map(|(owner, targets)| (*owner, targets.iter().copied().collect()))
+            .collect();
+        let muted_sets: HashMap<u32, HashSet<u32>> = mutes
+            .iter()
+            .map(|(owner, targets)| (*owner, targets.iter().copied().collect()))
+            .collect();
+        let followers = invert_edges(&followed_sets);
+        let muters = invert_edges(&muted_sets);
+        let distances = calculate_follow_distances(root_id, &followed_sets);
+
+        {
+            let mut wtxn = env.write_txn().unwrap();
+            let str_to_unique_id = env
+                .create_database::<Str, U32<BigEndian>>(&mut wtxn, Some(STR_TO_UNIQUE_ID_DB))
+                .unwrap();
+            let follow_distance_by_user = env
+                .create_database::<U32<BigEndian>, U32<BigEndian>>(
+                    &mut wtxn,
+                    Some(FOLLOW_DISTANCE_BY_USER_DB),
+                )
+                .unwrap();
+            let followed_by_user = env
+                .create_database::<U32<BigEndian>, SerdeBincode<Vec<u32>>>(
+                    &mut wtxn,
+                    Some(FOLLOWED_BY_USER_DB),
+                )
+                .unwrap();
+            let followers_by_user = env
+                .create_database::<U32<BigEndian>, SerdeBincode<Vec<u32>>>(
+                    &mut wtxn,
+                    Some(FOLLOWERS_BY_USER_DB),
+                )
+                .unwrap();
+            let muted_by_user = env
+                .create_database::<U32<BigEndian>, SerdeBincode<Vec<u32>>>(
+                    &mut wtxn,
+                    Some(MUTED_BY_USER_DB),
+                )
+                .unwrap();
+            let user_muted_by = env
+                .create_database::<U32<BigEndian>, SerdeBincode<Vec<u32>>>(
+                    &mut wtxn,
+                    Some(USER_MUTED_BY_DB),
+                )
+                .unwrap();
+
+            for (pubkey, id) in pubkeys {
+                str_to_unique_id.put(&mut wtxn, pubkey, id).unwrap();
+            }
+            for (id, distance) in distances {
+                follow_distance_by_user
+                    .put(&mut wtxn, &id, &distance)
+                    .unwrap();
+            }
+            for (owner, targets) in &followed_sets {
+                followed_by_user
+                    .put(&mut wtxn, owner, &targets.iter().copied().collect())
+                    .unwrap();
+            }
+            for (target, owners) in &followers {
+                followers_by_user
+                    .put(&mut wtxn, target, &owners.iter().copied().collect())
+                    .unwrap();
+            }
+            for (owner, targets) in &muted_sets {
+                muted_by_user
+                    .put(&mut wtxn, owner, &targets.iter().copied().collect())
+                    .unwrap();
+            }
+            for (target, owners) in &muters {
+                user_muted_by
+                    .put(&mut wtxn, target, &owners.iter().copied().collect())
+                    .unwrap();
+            }
+            wtxn.commit().unwrap();
+        }
+        env
+    }
+
     fn repeated_hex(byte: u8) -> String {
         (0..32).map(|_| format!("{byte:02x}")).collect()
     }
@@ -686,6 +1027,40 @@ mod tests {
             bytes.push(u8::from_str_radix(&pubkey[index..index + 2], 16).unwrap());
         }
         write_varint_for_test(bytes, id);
+    }
+
+    fn binary_snapshot(
+        pubkeys: &[&str],
+        follows: &[(u64, &[u64])],
+        mutes: &[(u64, &[u64])],
+    ) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        write_varint_for_test(&mut bytes, SOCIAL_GRAPH_BINARY_FORMAT_VERSION);
+        write_varint_for_test(&mut bytes, pubkeys.len() as u64);
+        for (index, pubkey) in pubkeys.iter().enumerate() {
+            push_id_for_test(&mut bytes, pubkey, (index + 1) as u64);
+        }
+
+        write_varint_for_test(&mut bytes, follows.len() as u64);
+        for (owner, followed) in follows {
+            write_varint_for_test(&mut bytes, *owner);
+            write_varint_for_test(&mut bytes, 0);
+            write_varint_for_test(&mut bytes, followed.len() as u64);
+            for target in *followed {
+                write_varint_for_test(&mut bytes, *target);
+            }
+        }
+
+        write_varint_for_test(&mut bytes, mutes.len() as u64);
+        for (owner, muted) in mutes {
+            write_varint_for_test(&mut bytes, *owner);
+            write_varint_for_test(&mut bytes, 0);
+            write_varint_for_test(&mut bytes, muted.len() as u64);
+            for target in *muted {
+                write_varint_for_test(&mut bytes, *target);
+            }
+        }
+        bytes
     }
 
     fn write_varint_for_test(bytes: &mut Vec<u8>, mut value: u64) {
