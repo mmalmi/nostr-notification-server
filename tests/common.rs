@@ -105,9 +105,8 @@ pub async fn start_server_with_extra_env(
     );
     fs::create_dir_all(&unique_db_path).expect("Failed to create unique test database directory");
 
-    let mut command = Command::new("cargo");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_nostr-notification-server"));
     command
-        .arg("run")
         .env("NNS_DB_PATH", &unique_db_path)
         .env("NNS_DB_MAP_SIZE", TEST_DB_MAP_SIZE)
         .env("NNS_RELAYS", "")
