@@ -10,7 +10,7 @@ Built on Rust, Heed (LMDB) and Flatbuffers.
 - Receives events from Nostr relays and REST API
 - Receives web hook and web push subscriptions over REST API
 - Sends notifications when events match subscription filters
-- Suppresses public notifications from unknown or overmuted authors for the configured social-graph root and subscriptions that opt into graph filtering
+- Suppresses public notifications from unknown or overmuted authors for subscriptions that enable graph filtering
 - Applies recipient mute lists to every notification while leaving encrypted DM delivery independent of public graph visibility
 
 ## Setup
@@ -60,9 +60,15 @@ NNS_RELAYS='["wss://relay1.com","wss://relay2.com"]'
 
 When `social_graph_snapshot_path` is configured, startup fails closed if the
 snapshot cannot be loaded. Binary HTTP snapshots and LMDB snapshots precompute
-the immutable notification visibility policy at startup. The configured graph
-root gets this protection even for legacy subscriptions whose
-`social_graph_filter` value is false; other subscribers retain that opt-out.
+the notification visibility policy at startup. The server reloads the snapshot
+every 60 seconds and replaces the policy only after a complete rebuild. Failed
+refreshes are logged and retain the last complete snapshot.
+
+`social_graph_filter` controls public notification filtering for every
+subscription, including the configured graph root. There are no recipient
+exceptions. In Iris, enable **Only from social graph** in notification settings
+to reject unknown and overmuted senders. Direct recipient mutes apply regardless
+of this setting.
 
 ## API (Default port: 3030)
 
