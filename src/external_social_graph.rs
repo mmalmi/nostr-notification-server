@@ -509,7 +509,7 @@ fn parse_social_graph_binary(
 ) -> Result<VisibilityPolicy, Box<dyn Error + Send + Sync>> {
     let mut offset = 0usize;
     let version = read_varint(data, &mut offset)?;
-    if version != SOCIAL_GRAPH_BINARY_FORMAT_VERSION {
+    if !matches!(version, SOCIAL_GRAPH_BINARY_FORMAT_VERSION | 3) {
         return Err(format!("unsupported social graph binary version: {version}").into());
     }
 
@@ -517,9 +517,7 @@ fn parse_social_graph_binary(
         .map_err(|_| "social graph ids count does not fit in memory")?;
     let mut pubkey_to_id = HashMap::with_capacity(ids_count);
     for _ in 0..ids_count {
-        let pubkey = hex_lower(read_bytes(data, &mut offset, 32)?);
-        let id = u32::try_from(read_varint(data, &mut offset)?)
-            .map_err(|_| "social graph id exceeds u32")?;
+        let (pubkey, id) = read_graph_node(version, data, &mut offset)?;
         pubkey_to_id.insert(pubkey, id);
     }
 
@@ -575,6 +573,35 @@ fn parse_social_graph_binary(
         muted_by_user,
         user_muted_by,
     )
+}
+
+fn read_graph_node(
+    version: u64,
+    data: &[u8],
+    offset: &mut usize,
+) -> Result<(String, u32), Box<dyn Error + Send + Sync>> {
+    if version == SOCIAL_GRAPH_BINARY_FORMAT_VERSION {
+        let pubkey = hex_lower(read_bytes(data, offset, 32)?);
+        let id =
+            u32::try_from(read_varint(data, offset)?).map_err(|_| "social graph id exceeds u32")?;
+        return Ok((pubkey, id));
+    }
+    let id =
+        u32::try_from(read_varint(data, offset)?).map_err(|_| "social graph id exceeds u32")?;
+    let value = match read_varint(data, offset)? {
+        0 => hex_lower(read_bytes(data, offset, 32)?),
+        1 => uuid::Uuid::from_slice(read_bytes(data, offset, 16)?)?.to_string(),
+        2 => {
+            let length = usize::try_from(read_varint(data, offset)?)
+                .map_err(|_| "social graph node length exceeds usize")?;
+            std::str::from_utf8(read_bytes(data, offset, length)?)?.to_owned()
+        }
+        kind => return Err(format!("unsupported social graph node type: {kind}").into()),
+    };
+    if value.trim().is_empty() {
+        return Err("social graph contains an empty node".into());
+    }
+    Ok((value, id))
 }
 
 fn calculate_follow_distances(
@@ -759,7 +786,11 @@ mod tests {
         let root = repeated_hex(1);
         let friend = repeated_hex(2);
         let muted = repeated_hex(3);
-        let legacy = binary_snapshot(&[&root, &friend, &muted], &[(1, &[2]), (2, &[3])], &[(1, &[3])]);
+        let legacy = binary_snapshot(
+            &[&root, &friend, &muted],
+            &[(1, &[2]), (2, &[3])],
+            &[(1, &[3])],
+        );
         let mut current = vec![3, 5];
         for (index, pubkey) in [&root, &friend, &muted].iter().enumerate() {
             current.extend([(index + 1) as u8, 0]);
