@@ -1033,6 +1033,52 @@ mod tests {
     }
 
     #[test]
+    fn persisted_root_notification_filter_survives_legacy_id_corruption(
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let db_path = std::env::temp_dir()
+            .join(format!("notification-root-{}", uuid::Uuid::new_v4()));
+        let settings = test_settings(db_path.to_string_lossy().into_owned());
+        let root = settings.social_graph_root_pubkey.clone();
+        let sender = Keys::generate();
+        let mut tags = BTreeMap::new();
+        tags.insert("#p".into(), vec![root.clone()]);
+        let subscription = Subscription {
+            webhooks: vec!["https://example.invalid/hook".into()],
+            web_push_subscriptions: Vec::new(),
+            fcm_tokens: Vec::new(),
+            apns_tokens: Vec::new(),
+            apns_topic: None,
+            apns_environment: None,
+            social_graph_filter: false,
+            filter: filter(None, Some(vec![1]), tags),
+            filters: Vec::new(),
+            subscriber: root.clone(),
+        };
+        {
+            let db = DbHandler::new(&settings)?;
+            db.save_subscription(&root, "root-public", &subscription)?;
+        }
+        // Older servers reused ID zero after restart, leaving the root's forward
+        // mapping in place but replacing its reverse mapping with a new author.
+        {
+            let ids = nostr_social_graph::UniqueIds::new(
+                db_path.join("unique_ids"),
+                Some(vec![(sender.public_key().to_hex(), 0)]),
+            ).map_err(|error| std::io::Error::other(error.to_string()))?;
+            assert_ne!(ids.str(0).unwrap(), root);
+        }
+        let db = Arc::new(DbHandler::new(&settings)?);
+        let event = EventBuilder::new(
+            Kind::TextNote, "unsolicited airdrop", [Tag::public_key(PublicKey::from_hex(&root)?)],
+        ).to_event(&sender)?;
+        assert!(collect_notification_jobs(&event, &db, &settings)?.is_empty(),
+            "persisted legacy mappings must never disable the root's graph policy");
+        drop(db);
+        std::fs::remove_dir_all(db_path)?;
+        Ok(())
+    }
+
+    #[test]
     fn non_root_public_notification_preserves_legacy_false_toggle(
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let unique = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
