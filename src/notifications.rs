@@ -134,9 +134,7 @@ fn subscription_allows_event(
         return Ok(true);
     }
 
-    let enforce_graph_visibility = subscription.social_graph_filter
-        || db_handler.is_social_graph_root(&subscription.subscriber)?;
-    if !enforce_graph_visibility {
+    if !subscription.social_graph_filter {
         return Ok(true);
     }
 
@@ -501,7 +499,7 @@ fn collect_author_notification_jobs(
 
     for (subscription_id, subscription) in subscriptions {
         if should_log_info {
-            info!("Processing subscription: {:?}", subscription);
+            info!("Processing subscription for {}", subscription.subscriber);
         }
         if subscription.matches_event(event)
             && subscription_allows_event(&subscription, event, db_handler)?
@@ -549,7 +547,7 @@ fn collect_p_tag_notification_jobs(
     );
 
     for (subscription_id, subscription) in subscriptions {
-        debug!("Processing subscription: {:?}", subscription);
+        debug!("Processing subscription for {}", subscription.subscriber);
         if subscription.matches_event(event)
             && subscription_allows_event(&subscription, event, db_handler)?
         {
@@ -996,7 +994,7 @@ mod tests {
     }
 
     #[test]
-    fn root_public_notification_uses_graph_policy_when_legacy_toggle_is_false(
+    fn root_public_notification_respects_same_false_toggle_as_other_accounts(
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let unique = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
         let db_path = std::env::temp_dir()
@@ -1026,7 +1024,10 @@ mod tests {
         let event = EventBuilder::new(Kind::TextNote, "unsolicited", [Tag::public_key(root_key)])
             .to_event(&sender_keys)?;
 
-        assert!(collect_notification_jobs(&event, &db_handler, &settings)?.is_empty());
+        assert_eq!(
+            collect_notification_jobs(&event, &db_handler, &settings)?.len(),
+            1
+        );
 
         std::fs::remove_dir_all(db_path).ok();
         Ok(())
@@ -1035,8 +1036,8 @@ mod tests {
     #[test]
     fn persisted_root_notification_filter_survives_legacy_id_corruption(
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let db_path = std::env::temp_dir()
-            .join(format!("notification-root-{}", uuid::Uuid::new_v4()));
+        let db_path =
+            std::env::temp_dir().join(format!("notification-root-{}", uuid::Uuid::new_v4()));
         let settings = test_settings(db_path.to_string_lossy().into_owned());
         let root = settings.social_graph_root_pubkey.clone();
         let sender = Keys::generate();
@@ -1049,7 +1050,7 @@ mod tests {
             apns_tokens: Vec::new(),
             apns_topic: None,
             apns_environment: None,
-            social_graph_filter: false,
+            social_graph_filter: true,
             filter: filter(None, Some(vec![1]), tags),
             filters: Vec::new(),
             subscriber: root.clone(),
@@ -1061,18 +1062,25 @@ mod tests {
         // Older servers reused ID zero after restart, leaving the root's forward
         // mapping in place but replacing its reverse mapping with a new author.
         {
-            let ids = nostr_social_graph::UniqueIds::new(
+            let ids = nostr_social_graph::UniqueIds::new_with_map_size(
                 db_path.join("unique_ids"),
-                Some(vec![(sender.public_key().to_hex(), 0)]),
-            ).map_err(|error| std::io::Error::other(error.to_string()))?;
+                Some(vec![(Keys::generate().public_key().to_hex(), 0)]),
+                settings.db_map_size,
+            )
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
             assert_ne!(ids.str(0).unwrap(), root);
         }
         let db = Arc::new(DbHandler::new(&settings)?);
         let event = EventBuilder::new(
-            Kind::TextNote, "unsolicited airdrop", [Tag::public_key(PublicKey::from_hex(&root)?)],
-        ).to_event(&sender)?;
-        assert!(collect_notification_jobs(&event, &db, &settings)?.is_empty(),
-            "persisted legacy mappings must never disable the root's graph policy");
+            Kind::TextNote,
+            "unsolicited airdrop",
+            [Tag::public_key(PublicKey::from_hex(&root)?)],
+        )
+        .to_event(&sender)?;
+        assert!(
+            collect_notification_jobs(&event, &db, &settings)?.is_empty(),
+            "persisted legacy mappings must never disable subscription filtering"
+        );
         drop(db);
         std::fs::remove_dir_all(db_path)?;
         Ok(())

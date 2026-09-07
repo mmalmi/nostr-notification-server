@@ -32,6 +32,7 @@ pub struct DbHandler {
     recipient_mute_list_created_at: Database<Str, U64<BigEndian>>,
     push_target_rate_limits: Database<Str, SerdeBincode<PushTargetRateLimitState>>,
     external_social_graph: Option<ExternalSocialGraph>,
+    social_graph_root_pubkey: String,
 }
 
 const PUSH_TARGET_INDEX_VERSION_KEY: &str = "push_target_indices_version";
@@ -165,6 +166,7 @@ impl DbHandler {
             recipient_mute_list_created_at,
             push_target_rate_limits,
             external_social_graph,
+            social_graph_root_pubkey: root_hex,
         };
 
         handler.ensure_push_target_indices()?;
@@ -930,11 +932,14 @@ impl DbHandler {
         Ok(self.social_graph.get_follow_distance(pubkey)? < 1000)
     }
 
-    pub fn is_social_graph_root(
+    pub fn refresh_social_graph(
         &self,
-        pubkey: &str,
-    ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
-        Ok(self.social_graph.get_root()? == pubkey)
+        source: &str,
+    ) -> Result<(), Box<dyn StdError + Send + Sync>> {
+        if let Some(graph) = &self.external_social_graph {
+            graph.refresh(source, &self.social_graph_root_pubkey)?;
+        }
+        Ok(())
     }
 
     pub fn is_notification_author_visible(
@@ -949,7 +954,7 @@ impl DbHandler {
             return external_social_graph.is_author_visible(recipient, author);
         }
         if recipient == author
-            || self.social_graph.get_root()? == author
+            || self.social_graph_root_pubkey == author
             || self.social_graph.is_following(recipient, author)?
         {
             return Ok(true);

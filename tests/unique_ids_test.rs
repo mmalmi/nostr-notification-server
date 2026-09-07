@@ -13,7 +13,12 @@ fn unique_ids_survive_restarts_and_interleaved_writers() {
         let first = UniqueIds::new(&path, None).unwrap();
         let second = UniqueIds::new(&path, None).unwrap();
         assert_eq!(first.get_or_create_id("newcomer").unwrap(), 2);
-        assert_eq!(second.batch_insert(&["batch".into(), "root".into()]).unwrap(), vec![3, 0]);
+        assert_eq!(
+            second
+                .batch_insert(&["batch".into(), "root".into()])
+                .unwrap(),
+            vec![3, 0]
+        );
         assert_eq!(first.get_or_create_id("last").unwrap(), 4);
         for (name, id) in first.serialize().unwrap() {
             assert_eq!(first.str(id).unwrap(), name);

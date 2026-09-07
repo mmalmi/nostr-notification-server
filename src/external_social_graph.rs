@@ -7,6 +7,7 @@ use std::fmt;
 use std::io::{self, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::Path;
+use std::sync::RwLock;
 use std::thread;
 use std::time::Duration;
 
@@ -27,7 +28,7 @@ const USER_MUTED_BY_DB: &str = "user_muted_by";
 const OVERMUTE_THRESHOLD: usize = 3;
 
 pub struct ExternalSocialGraph {
-    policy: VisibilityPolicy,
+    policy: RwLock<VisibilityPolicy>,
 }
 
 struct VisibilityPolicy {
@@ -197,12 +198,17 @@ impl ExternalSocialGraph {
                 followers_by_user,
                 muted_by_user,
                 user_muted_by,
-            )?,
+            )?
+            .into(),
         })
     }
 
     pub fn is_pubkey_in_graph(&self, pubkey: &str) -> Result<bool, Box<dyn Error + Send + Sync>> {
-        Ok(self.policy.is_pubkey_in_graph(pubkey))
+        Ok(self
+            .policy
+            .read()
+            .map_err(|_| "graph policy lock poisoned")?
+            .is_pubkey_in_graph(pubkey))
     }
 
     pub fn recipient_has_muted_author(
@@ -210,7 +216,11 @@ impl ExternalSocialGraph {
         recipient: &str,
         author: &str,
     ) -> Result<bool, Box<dyn Error + Send + Sync>> {
-        Ok(self.policy.recipient_has_muted_author(recipient, author))
+        Ok(self
+            .policy
+            .read()
+            .map_err(|_| "graph policy lock poisoned")?
+            .recipient_has_muted_author(recipient, author))
     }
 
     pub fn is_author_visible(
@@ -218,7 +228,30 @@ impl ExternalSocialGraph {
         recipient: &str,
         author: &str,
     ) -> Result<bool, Box<dyn Error + Send + Sync>> {
-        Ok(self.policy.is_author_visible(recipient, author))
+        Ok(self
+            .policy
+            .read()
+            .map_err(|_| "graph policy lock poisoned")?
+            .is_author_visible(recipient, author))
+    }
+
+    pub fn refresh(
+        &self,
+        source: &str,
+        root_pubkey: &str,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        // Fetch and fully compute the next policy before replacing the active
+        // snapshot. Readers never observe a partially rebuilt graph.
+        let replacement = Self::open(source, root_pubkey)?;
+        let policy = replacement
+            .policy
+            .into_inner()
+            .map_err(|_| "graph policy lock poisoned")?;
+        *self
+            .policy
+            .write()
+            .map_err(|_| "graph policy lock poisoned")? = policy;
+        Ok(())
     }
 
     fn from_social_graph_url(
@@ -234,7 +267,9 @@ impl ExternalSocialGraph {
         data: &[u8],
     ) -> Result<Self, Box<dyn Error + Send + Sync>> {
         let snapshot = parse_social_graph_binary(root_pubkey, data)?;
-        Ok(Self { policy: snapshot })
+        Ok(Self {
+            policy: snapshot.into(),
+        })
     }
 }
 
@@ -718,6 +753,51 @@ mod tests {
     use super::*;
     use std::fs;
     use uuid::Uuid;
+
+    #[test]
+    fn refresh_updates_visibility_and_keeps_complete_policy_on_failure() {
+        let root = "11".repeat(32);
+        let friend = "22".repeat(32);
+        let sender = "33".repeat(32);
+        let initial = binary_snapshot(&[&root, &friend, &sender], &[(1, &[2]), (2, &[3])], &[]);
+        let muted = binary_snapshot(
+            &[&root, &friend, &sender],
+            &[(1, &[2]), (2, &[3])],
+            &[(1, &[3])],
+        );
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/social-graph", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            for body in [initial, muted, vec![255]] {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut request = Vec::new();
+                let mut byte = [0];
+                while !request.ends_with(b"\r\n\r\n") {
+                    stream.read_exact(&mut byte).unwrap();
+                    request.push(byte[0]);
+                }
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .unwrap();
+                stream.write_all(&body).unwrap();
+            }
+        });
+        let graph = ExternalSocialGraph::open(&url, &root).unwrap();
+        assert!(graph.is_author_visible(&root, &sender).unwrap());
+        graph.refresh(&url, &root).unwrap();
+        assert!(!graph.is_author_visible(&root, &sender).unwrap());
+        assert!(graph.is_author_visible(&root, &friend).unwrap());
+        assert!(graph.refresh(&url, &root).is_err());
+        assert!(!graph.is_author_visible(&root, &sender).unwrap());
+        assert!(graph.is_author_visible(&root, &friend).unwrap());
+        server.join().unwrap();
+    }
 
     const TEST_MAP_SIZE: usize = 128 * 1024 * 1024;
 

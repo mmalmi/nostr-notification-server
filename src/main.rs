@@ -98,6 +98,32 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let shutdown_flag_nostr = Arc::clone(&shutdown_flag);
     let shutdown_flag_http = Arc::clone(&shutdown_flag);
 
+    if let Some(source) = settings
+        .social_graph_snapshot_path
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+    {
+        let db = Arc::downgrade(&db_handler);
+        let shutdown = shutdown_flag.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                if shutdown.load(Ordering::Relaxed) {
+                    break;
+                }
+                let Some(db) = db.upgrade() else { break };
+                let source = source.clone();
+                match tokio::task::spawn_blocking(move || db.refresh_social_graph(&source)).await {
+                    Ok(Ok(())) => info!("Refreshed notification social graph"),
+                    Ok(Err(error)) => error!(
+                        "Social graph refresh failed; retaining last complete snapshot: {error}"
+                    ),
+                    Err(error) => error!("Social graph refresh task failed: {error}"),
+                }
+            }
+        });
+    }
+
     let settings_clone = Arc::clone(&settings);
     let db_handler_clone = db_handler.clone();
     debug!("Spawning Nostr client");
