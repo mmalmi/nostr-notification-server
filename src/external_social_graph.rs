@@ -755,6 +755,35 @@ mod tests {
     use uuid::Uuid;
 
     #[test]
+    fn version_three_snapshot_keeps_notification_visibility_rules() {
+        let root = repeated_hex(1);
+        let friend = repeated_hex(2);
+        let muted = repeated_hex(3);
+        let legacy = binary_snapshot(&[&root, &friend, &muted], &[(1, &[2]), (2, &[3])], &[(1, &[3])]);
+        let mut current = vec![3, 5];
+        for (index, pubkey) in [&root, &friend, &muted].iter().enumerate() {
+            current.extend([(index + 1) as u8, 0]);
+            for offset in (0..pubkey.len()).step_by(2) {
+                current.push(u8::from_str_radix(&pubkey[offset..offset + 2], 16).unwrap());
+            }
+        }
+        current.extend([4, 1]);
+        current.extend(Uuid::nil().as_bytes());
+        current.extend([5, 2, 6]);
+        current.extend(b"entity");
+        current.extend_from_slice(&legacy[2 + 3 * 33..]);
+        let graph = ExternalSocialGraph::from_social_graph_binary(&root, &current).unwrap();
+        assert!(graph.is_author_visible(&root, &friend).unwrap());
+        assert!(!graph.is_author_visible(&root, &muted).unwrap());
+        assert!(!graph.is_author_visible(&root, &repeated_hex(9)).unwrap());
+
+        let mut invalid = current.clone();
+        invalid[3] = 9;
+        assert!(ExternalSocialGraph::from_social_graph_binary(&root, &invalid).is_err());
+        assert!(ExternalSocialGraph::from_social_graph_binary(&root, &current[..12]).is_err());
+    }
+
+    #[test]
     fn refresh_updates_visibility_and_keeps_complete_policy_on_failure() {
         let root = "11".repeat(32);
         let friend = "22".repeat(32);
