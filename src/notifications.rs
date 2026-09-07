@@ -291,24 +291,11 @@ fn create_event_details(event: &Event) -> EventDetails {
     };
     if event.kind.as_u16() == 1060 {
         details.created_at = Some(event.created_at.as_secs());
-        details.tags = Some(header_tags(event));
+        details.tags = Some(event.tags.iter().map(|tag| tag.clone().to_vec()).collect());
         details.content = Some(event.content.clone());
         details.sig = Some(event.sig.to_string());
     }
     details
-}
-
-pub(crate) fn header_tags(event: &Event) -> Vec<Vec<String>> {
-    event
-        .tags
-        .iter()
-        .filter(|tag| {
-            tag.as_slice()
-                .first()
-                .is_some_and(|value| value == "header")
-        })
-        .map(|tag| tag.clone().to_vec())
-        .collect()
 }
 
 async fn send_webhook(
@@ -918,14 +905,20 @@ mod tests {
         assert_eq!(details.content.as_deref(), Some("encrypted rumor"));
         let sig = event.sig.to_string();
         assert_eq!(details.sig.as_deref(), Some(sig.as_str()));
-        assert_eq!(
-            details.tags,
-            Some(vec![vec![
-                "header".to_string(),
-                "recipient".to_string(),
-                "ciphertext".to_string(),
-            ]])
-        );
+        let reconstructed = serde_json::json!({
+            "id": details.id,
+            "pubkey": details.author,
+            "created_at": details.created_at,
+            "kind": details.kind,
+            "tags": details.tags,
+            "content": details.content,
+            "sig": details.sig,
+        });
+        let received: Event = serde_json::from_value(reconstructed).unwrap();
+        received
+            .verify()
+            .expect("large payloads must retain every signed field");
+        assert_eq!(received, event);
     }
 
     #[tokio::test]
@@ -1207,7 +1200,8 @@ mod tests {
             subscriber: subscriber.clone(),
         };
         db_handler.save_subscription(&subscriber, "muted-encrypted", &subscription)?;
-        let event = EventBuilder::new(Kind::from(1060), "ciphertext").sign_with_keys(&sender_keys)?;
+        let event =
+            EventBuilder::new(Kind::from(1060), "ciphertext").sign_with_keys(&sender_keys)?;
 
         assert!(collect_notification_jobs(&event, &db_handler, &settings)?.is_empty());
 

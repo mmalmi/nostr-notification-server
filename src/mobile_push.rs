@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::config::{ApnsCredential, Settings};
-use crate::notifications::{header_tags, EventDetails, EventPayload, NotificationPayload};
+use crate::notifications::{EventDetails, EventPayload, NotificationPayload};
 
 #[derive(Debug, Deserialize)]
 struct FcmServiceAccount {
@@ -232,15 +232,9 @@ fn fcm_event_payload_json(event: &EventPayload) -> Result<String, serde_json::Er
 
 fn compact_event_payload_for_apns(event: &EventPayload) -> serde_json::Value {
     match event {
-        EventPayload::Full(event) => json!({
-            "id": event.id.to_hex(),
-            "pubkey": event.pubkey.to_hex(),
-            "created_at": event.created_at.as_secs(),
-            "kind": event.kind.as_u16(),
-            "tags": header_tags(event),
-            "content": event.content,
-            "sig": event.sig.to_string(),
-        }),
+        // Every tag is covered by the event ID and signature, including recipient
+        // and extension tags that are not needed to decrypt the header itself.
+        EventPayload::Full(event) => json!(event),
         EventPayload::Details(details) => compact_event_details(details),
     }
 }
@@ -454,10 +448,37 @@ mod tests {
     };
     use crate::config::ApnsCredential;
     use crate::notifications::{EventDetails, EventPayload, NotificationPayload};
-    use nostr_sdk::nostr::Event;
+    use nostr_sdk::nostr::{Event, EventBuilder, Keys, Kind, Tag};
     use nostr_sdk::JsonUtil;
     use serde_json::json;
     use std::collections::HashMap;
+
+    #[test]
+    fn apns_preserves_signed_event_with_recipient_and_other_tags() {
+        let event = EventBuilder::new(Kind::from(1060), "encrypted message")
+            .tags([
+                Tag::parse(["header", "recipient", "encrypted header"]).unwrap(),
+                Tag::public_key(Keys::generate().public_key()),
+                Tag::parse(["extension", "signed metadata"]).unwrap(),
+            ])
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        event.verify().unwrap();
+        let payload = NotificationPayload {
+            event: EventPayload::Full(Box::new(event.clone())),
+            title: "DM by Someone".into(),
+            body: "New message".into(),
+            icon: String::new(),
+            url: String::new(),
+        };
+
+        let body = build_apns_request_body(&payload);
+        let received: Event = serde_json::from_value(body["event"].clone()).unwrap();
+        received
+            .verify()
+            .expect("APNs must preserve the signed event");
+        assert_eq!(received, event);
+    }
 
     fn sample_event_payload() -> EventPayload {
         EventPayload::Full(Box::new(
