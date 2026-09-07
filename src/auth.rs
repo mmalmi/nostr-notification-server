@@ -41,7 +41,7 @@ pub async fn verify_nostr_auth(
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?
             .as_secs();
 
-        let event_time = event.created_at.as_u64();
+        let event_time = event.created_at.as_secs();
         if event_time > current_time + 600 {
             return Err("Auth event timestamp too far in future".into());
         }
@@ -53,12 +53,12 @@ pub async fn verify_nostr_auth(
         let url_tag = event
             .tags
             .iter()
-            .find(|tag| matches!(Tag::parse(&["u", url]), Ok(t) if t == **tag));
+            .find(|tag| matches!(Tag::parse(["u", url]), Ok(t) if t == **tag));
 
         let method_tag = event
             .tags
             .iter()
-            .find(|tag| matches!(Tag::parse(&["method", method]), Ok(t) if t == **tag));
+            .find(|tag| matches!(Tag::parse(["method", method]), Ok(t) if t == **tag));
 
         match (url_tag, method_tag) {
             (Some(_), Some(_)) => Ok(event.pubkey.to_string()),

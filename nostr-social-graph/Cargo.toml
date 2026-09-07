@@ -8,5 +8,5 @@ heed = "0.20.5"
 serde_json = "1.0.132"
 url = "2.5.3"
 tokio = { version = "1.0", features = ["full"] }
-nostr-sdk = "0.35"
+nostr-sdk = "0.44.1"
 log = "0.4"

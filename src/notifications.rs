@@ -290,7 +290,7 @@ fn create_event_details(event: &Event) -> EventDetails {
         sig: None,
     };
     if event.kind.as_u16() == 1060 {
-        details.created_at = Some(event.created_at.as_u64());
+        details.created_at = Some(event.created_at.as_secs());
         details.tags = Some(header_tags(event));
         details.content = Some(event.content.clone());
         details.sig = Some(event.sig.to_string());
@@ -475,7 +475,7 @@ fn collect_author_notification_jobs(
         .tags
         .iter()
         .any(|tag| tag.as_slice().first().is_some_and(|v| *v == "header"));
-    let should_log_info = event.kind == Kind::Replaceable(30078) && has_header;
+    let should_log_info = event.kind == Kind::from(30078) && has_header;
 
     if should_log_info {
         info!("Processing author: {} for event: {}", author, event.id);
@@ -872,8 +872,8 @@ mod tests {
         let settings = test_settings(db_path.clone());
         let db_handler = Arc::new(DbHandler::new(&settings)?);
 
-        let event = EventBuilder::new(Kind::TextNote, "firehose noise", [])
-            .to_event(&Keys::generate())
+        let event = EventBuilder::new(Kind::TextNote, "firehose noise")
+            .sign_with_keys(&Keys::generate())
             .expect("event");
 
         handle_incoming_event(&event, db_handler.clone(), &settings).await?;
@@ -894,11 +894,12 @@ mod tests {
         let mut tags = Vec::new();
         for index in 0..80 {
             let value = format!("{}-{index}", "x".repeat(100));
-            tags.push(Tag::parse(&["noise", value.as_str()]).expect("noise tag"));
+            tags.push(Tag::parse(["noise", value.as_str()]).expect("noise tag"));
         }
-        tags.push(Tag::parse(&["header", "recipient", "ciphertext"]).expect("header tag"));
-        let event = EventBuilder::new(Kind::from(1060), "encrypted rumor", tags)
-            .to_event(&keys)
+        tags.push(Tag::parse(["header", "recipient", "ciphertext"]).expect("header tag"));
+        let event = EventBuilder::new(Kind::from(1060), "encrypted rumor")
+            .tags(tags)
+            .sign_with_keys(&keys)
             .expect("event");
         assert!(
             serde_json::to_vec(&event).expect("event json").len() > 4096,
@@ -913,7 +914,7 @@ mod tests {
         assert_eq!(details.id, event.id.to_hex());
         assert_eq!(details.author, event.pubkey.to_hex());
         assert_eq!(details.kind, 1060);
-        assert_eq!(details.created_at, Some(event.created_at.as_u64()));
+        assert_eq!(details.created_at, Some(event.created_at.as_secs()));
         assert_eq!(details.content.as_deref(), Some("encrypted rumor"));
         let sig = event.sig.to_string();
         assert_eq!(details.sig.as_deref(), Some(sig.as_str()));
@@ -944,7 +945,11 @@ mod tests {
                     warp::http::StatusCode::OK,
                 )
             });
-        let (addr, server) = warp::serve(route).bind_ephemeral(([127, 0, 0, 1], 0));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock server");
+        let addr = listener.local_addr().expect("mock server address");
+        let server = warp::serve(route).incoming(listener).run();
         tokio::spawn(server);
 
         let unique = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
@@ -976,8 +981,9 @@ mod tests {
         db_handler.save_subscription(&subscriber, "overlapping-subscription", &subscription)?;
 
         let p_tag = Tag::public_key(subscriber_keys.public_key());
-        let event = EventBuilder::new(Kind::TextNote, "hello", [p_tag.clone(), p_tag])
-            .to_event(&sender_keys)
+        let event = EventBuilder::new(Kind::TextNote, "hello")
+            .tags([p_tag.clone(), p_tag])
+            .sign_with_keys(&sender_keys)
             .expect("event");
 
         handle_incoming_event(&event, db_handler, &settings).await?;
@@ -1021,8 +1027,9 @@ mod tests {
         };
         db_handler.save_subscription(&root, "root-public", &subscription)?;
         let root_key = PublicKey::from_hex(&root)?;
-        let event = EventBuilder::new(Kind::TextNote, "unsolicited", [Tag::public_key(root_key)])
-            .to_event(&sender_keys)?;
+        let event = EventBuilder::new(Kind::TextNote, "unsolicited")
+            .tags([Tag::public_key(root_key)])
+            .sign_with_keys(&sender_keys)?;
 
         assert_eq!(
             collect_notification_jobs(&event, &db_handler, &settings)?.len(),
@@ -1071,12 +1078,9 @@ mod tests {
             assert_ne!(ids.str(0).unwrap(), root);
         }
         let db = Arc::new(DbHandler::new(&settings)?);
-        let event = EventBuilder::new(
-            Kind::TextNote,
-            "unsolicited airdrop",
-            [Tag::public_key(PublicKey::from_hex(&root)?)],
-        )
-        .to_event(&sender)?;
+        let event = EventBuilder::new(Kind::TextNote, "unsolicited airdrop")
+            .tags([Tag::public_key(PublicKey::from_hex(&root)?)])
+            .sign_with_keys(&sender)?;
         assert!(
             collect_notification_jobs(&event, &db, &settings)?.is_empty(),
             "persisted legacy mappings must never disable subscription filtering"
@@ -1114,12 +1118,9 @@ mod tests {
             subscriber: subscriber.clone(),
         };
         db_handler.save_subscription(&subscriber, "non-root-public", &subscription)?;
-        let event = EventBuilder::new(
-            Kind::TextNote,
-            "legacy opt-out",
-            [Tag::public_key(subscriber_keys.public_key())],
-        )
-        .to_event(&sender_keys)?;
+        let event = EventBuilder::new(Kind::TextNote, "legacy opt-out")
+            .tags([Tag::public_key(subscriber_keys.public_key())])
+            .sign_with_keys(&sender_keys)?;
 
         assert_eq!(
             collect_notification_jobs(&event, &db_handler, &settings)?.len(),
@@ -1160,7 +1161,7 @@ mod tests {
             let subscription_id = format!("encrypted-{kind}");
             db_handler.save_subscription(&root, &subscription_id, &subscription)?;
             let event =
-                EventBuilder::new(Kind::from(kind), "ciphertext", []).to_event(&sender_keys)?;
+                EventBuilder::new(Kind::from(kind), "ciphertext").sign_with_keys(&sender_keys)?;
 
             assert_eq!(
                 collect_notification_jobs(&event, &db_handler, &settings)?.len(),
@@ -1188,12 +1189,9 @@ mod tests {
         let mut settings = test_settings(db_path.clone());
         settings.social_graph_root_pubkey = subscriber.clone();
         let db_handler = Arc::new(DbHandler::new(&settings)?);
-        let mute_event = EventBuilder::new(
-            Kind::from(10_000),
-            "",
-            [Tag::public_key(sender_keys.public_key())],
-        )
-        .to_event(&subscriber_keys)?;
+        let mute_event = EventBuilder::new(Kind::from(10_000), "")
+            .tags([Tag::public_key(sender_keys.public_key())])
+            .sign_with_keys(&subscriber_keys)?;
         db_handler.handle_mute_list_event(&mute_event)?;
 
         let subscription = Subscription {
@@ -1209,7 +1207,7 @@ mod tests {
             subscriber: subscriber.clone(),
         };
         db_handler.save_subscription(&subscriber, "muted-encrypted", &subscription)?;
-        let event = EventBuilder::new(Kind::from(1060), "ciphertext", []).to_event(&sender_keys)?;
+        let event = EventBuilder::new(Kind::from(1060), "ciphertext").sign_with_keys(&sender_keys)?;
 
         assert!(collect_notification_jobs(&event, &db_handler, &settings)?.is_empty());
 

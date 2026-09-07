@@ -180,11 +180,15 @@ pub async fn run_http_server(
         .with(cors());
 
     // Create server
-    let (addr, server) = warp::serve(routes)
-        .bind_with_graceful_shutdown(([0, 0, 0, 0], port), shutdown_signal(shutdown_flag));
+    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, port)).await?;
+    let addr = listener.local_addr()?;
 
     info!("Server running on http://{}", addr);
-    server.await;
+    warp::serve(routes)
+        .incoming(listener)
+        .graceful(shutdown_signal(shutdown_flag))
+        .run()
+        .await;
     info!("HTTP server shutdown complete");
 
     Ok(())

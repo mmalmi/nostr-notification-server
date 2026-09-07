@@ -235,7 +235,7 @@ fn compact_event_payload_for_apns(event: &EventPayload) -> serde_json::Value {
         EventPayload::Full(event) => json!({
             "id": event.id.to_hex(),
             "pubkey": event.pubkey.to_hex(),
-            "created_at": event.created_at.as_u64(),
+            "created_at": event.created_at.as_secs(),
             "kind": event.kind.as_u16(),
             "tags": header_tags(event),
             "content": event.content,

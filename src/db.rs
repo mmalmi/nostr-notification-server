@@ -852,7 +852,7 @@ impl DbHandler {
             return Ok(());
         }
 
-        let created_at = event.created_at.as_u64();
+        let created_at = event.created_at.as_secs();
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -1384,14 +1384,11 @@ mod tests {
         let recipient = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
         db.social_graph.add_follower(&root, &muter)?;
         db.social_graph.add_follower(&root, recipient)?;
-        let mute_event = nostr_sdk::EventBuilder::new(
-            nostr_sdk::Kind::from(10_000),
-            "",
-            [nostr_sdk::Tag::public_key(nostr_sdk::PublicKey::from_hex(
+        let mute_event = nostr_sdk::EventBuilder::new(nostr_sdk::Kind::from(10_000), "")
+            .tags([nostr_sdk::Tag::public_key(nostr_sdk::PublicKey::from_hex(
                 &root,
-            )?)],
-        )
-        .to_event(&muter_keys)?;
+            )?)])
+            .sign_with_keys(&muter_keys)?;
         db.handle_mute_list_event(&mute_event)?;
 
         assert!(db.is_notification_author_visible(recipient, &root)?);

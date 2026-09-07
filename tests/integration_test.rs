@@ -261,7 +261,7 @@ async fn test_event_endpoint(
     );
 
     let event = unsigned_event
-        .sign(&sender_keys)
+        .sign_with_keys(&sender_keys)
         .expect("Failed to sign event");
 
     println!("Sending test event to server...");
@@ -515,7 +515,7 @@ async fn test_encrypted_dm_notifications(
     );
 
     let dm_event = unsigned_dm
-        .sign(&sender_keys)
+        .sign_with_keys(&sender_keys)
         .expect("Failed to sign DM event");
 
     println!("Sending test DM event to server...");
@@ -746,7 +746,7 @@ async fn test_mobile_push_delivery(
         vec![Tag::public_key(subscriber_keys.public_key())],
         "ciphertext".to_string(),
     )
-    .sign(&sender_keys)
+    .sign_with_keys(&sender_keys)
     .expect("Failed to sign mobile push test event");
 
     let response = client
@@ -886,7 +886,7 @@ async fn test_mobile_push_token_moves_between_subscriptions(
         Vec::new(),
         "old ciphertext".to_string(),
     )
-    .sign(&old_author_keys)
+    .sign_with_keys(&old_author_keys)
     .expect("Failed to sign old-author event");
     let response = client
         .post("http://127.0.0.1:3030/events")
@@ -914,7 +914,7 @@ async fn test_mobile_push_token_moves_between_subscriptions(
         Vec::new(),
         "new ciphertext".to_string(),
     )
-    .sign(&new_author_keys)
+    .sign_with_keys(&new_author_keys)
     .expect("Failed to sign new-author event");
     let response = client
         .post("http://127.0.0.1:3030/events")
@@ -1025,7 +1025,7 @@ async fn test_web_push_endpoint_moves_between_subscriptions(
         Vec::new(),
         "old content".to_string(),
     )
-    .sign(&old_author_keys)
+    .sign_with_keys(&old_author_keys)
     .expect("Failed to sign old-author web push event");
     let response = client
         .post("http://127.0.0.1:3030/events")
@@ -1048,7 +1048,7 @@ async fn test_web_push_endpoint_moves_between_subscriptions(
         Vec::new(),
         "new content".to_string(),
     )
-    .sign(&new_author_keys)
+    .sign_with_keys(&new_author_keys)
     .expect("Failed to sign new-author web push event");
     let response = client
         .post("http://127.0.0.1:3030/events")
@@ -1112,7 +1112,7 @@ async fn test_seen_events_persistence(
         vec![Tag::public_key(subscriber_keys.public_key())],
         "Test event for persistence".to_string(),
     )
-    .sign(&sender_keys)
+    .sign_with_keys(&sender_keys)
     .expect("Failed to sign event");
 
     println!("Sending first event (should trigger notifications)...");
@@ -1224,7 +1224,7 @@ async fn test_social_graph_filtered_notifications(
         vec![Tag::public_key(allowed_author_keys.public_key())],
         String::new(),
     )
-    .sign(&root_keys)
+    .sign_with_keys(&root_keys)
     .expect("Failed to sign contact list event");
 
     let response = client
@@ -1242,7 +1242,7 @@ async fn test_social_graph_filtered_notifications(
         vec![Tag::public_key(muted_author_keys.public_key())],
         String::new(),
     )
-    .sign(&subscriber_keys)
+    .sign_with_keys(&subscriber_keys)
     .expect("Failed to sign mute list event");
 
     let response = client
@@ -1371,7 +1371,7 @@ async fn test_muted_authors_are_blocked_without_social_graph_filter(
         vec![Tag::public_key(muted_author_keys.public_key())],
         String::new(),
     )
-    .sign(&subscriber_keys)
+    .sign_with_keys(&subscriber_keys)
     .expect("Failed to sign mute list event");
 
     let response = client

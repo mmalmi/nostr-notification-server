@@ -221,15 +221,16 @@ mod tests {
             subscriber,
         };
 
-        let message_event = EventBuilder::new(Kind::from(1060), "ciphertext", [])
-            .to_event(&message_keys)
+        let message_event = EventBuilder::new(Kind::from(1060), "ciphertext")
+            .sign_with_keys(&message_keys)
             .expect("message event");
-        let invite_tag = Tag::parse(&["p", invite_recipient.as_str()]).expect("p tag");
-        let invite_event = EventBuilder::new(Kind::from(1059), "ciphertext", [invite_tag])
-            .to_event(&Keys::generate())
+        let invite_tag = Tag::parse(["p", invite_recipient.as_str()]).expect("p tag");
+        let invite_event = EventBuilder::new(Kind::from(1059), "ciphertext")
+            .tags([invite_tag])
+            .sign_with_keys(&Keys::generate())
             .expect("invite response event");
-        let unrelated_event = EventBuilder::new(Kind::from(1060), "ciphertext", [])
-            .to_event(&Keys::generate())
+        let unrelated_event = EventBuilder::new(Kind::from(1060), "ciphertext")
+            .sign_with_keys(&Keys::generate())
             .expect("unrelated event");
 
         assert!(subscription.matches_event(&message_event));

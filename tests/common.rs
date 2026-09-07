@@ -207,7 +207,11 @@ pub async fn start_mock_push_server() -> (u16, Arc<Mutex<Vec<serde_json::Value>>
 
     let routes = push_route.or(not_found);
 
-    let (addr, server) = warp::serve(routes).bind_ephemeral(([127, 0, 0, 1], 0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock server");
+    let addr = listener.local_addr().expect("mock server address");
+    let server = warp::serve(routes).incoming(listener).run();
 
     tokio::spawn(server);
     (addr.port(), received_pushes)
@@ -231,7 +235,11 @@ pub async fn start_mock_webhook_server() -> (u16, Arc<Mutex<Vec<serde_json::Valu
             warp::reply::with_status(warp::reply::json(&"{}"), warp::http::StatusCode::OK)
         });
 
-    let (addr, server) = warp::serve(routes).bind_ephemeral(([127, 0, 0, 1], 0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock server");
+    let addr = listener.local_addr().expect("mock server address");
+    let server = warp::serve(routes).incoming(listener).run();
 
     println!("🚀 Mock webhook server started on port {}", addr.port());
     tokio::spawn(server);
@@ -281,7 +289,11 @@ pub async fn start_mock_fcm_server() -> (u16, Arc<Mutex<Vec<serde_json::Value>>>
 
     let routes = token_route.or(send_route);
 
-    let (addr, server) = warp::serve(routes).bind_ephemeral(([127, 0, 0, 1], 0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock server");
+    let addr = listener.local_addr().expect("mock server address");
+    let server = warp::serve(routes).incoming(listener).run();
     tokio::spawn(server);
     (addr.port(), received_messages)
 }
@@ -316,7 +328,11 @@ pub async fn start_mock_apns_server() -> (u16, Arc<Mutex<Vec<serde_json::Value>>
             },
         );
 
-    let (addr, server) = warp::serve(route).bind_ephemeral(([127, 0, 0, 1], 0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock server");
+    let addr = listener.local_addr().expect("mock server address");
+    let server = warp::serve(route).incoming(listener).run();
     tokio::spawn(server);
     (addr.port(), received_pushes)
 }
@@ -349,8 +365,8 @@ async fn create_auth_header(url: &str, method: &str) -> String {
 
 async fn create_auth_header_with_keys(url: &str, method: &str, keys: &Keys) -> String {
     let tags = vec![
-        Tag::parse(&["u", url]).expect("Failed to create url tag"),
-        Tag::parse(&["method", method]).expect("Failed to create method tag"),
+        Tag::parse(["u", url]).expect("Failed to create url tag"),
+        Tag::parse(["method", method]).expect("Failed to create method tag"),
     ];
 
     let unsigned_event = UnsignedEvent::new(
@@ -361,7 +377,7 @@ async fn create_auth_header_with_keys(url: &str, method: &str, keys: &Keys) -> S
         String::new(),
     );
 
-    let event = unsigned_event.sign(keys).expect("Failed to sign event");
+    let event = unsigned_event.sign_with_keys(keys).expect("Failed to sign event");
 
     format!(
         "Nostr {}",
@@ -439,6 +455,6 @@ pub fn create_test_event(sender_keys: &Keys, recipient_pubkey: &str) -> Event {
     );
 
     unsigned_event
-        .sign(sender_keys)
+        .sign_with_keys(sender_keys)
         .expect("Failed to sign event")
 }

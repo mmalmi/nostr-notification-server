@@ -1,5 +1,4 @@
 use log::debug;
-use nostr_sdk::base64::{engine::general_purpose, Engine as _};
 use std::error::Error;
 use std::fs;
 use std::path::Path;
@@ -60,7 +59,7 @@ fn generate_vapid_keys() -> Result<(), Box<dyn std::error::Error>> {
     let raw_public_key = &public_key_output.stdout[26..91];
 
     // URL-safe base64 encode the raw public key bytes
-    let public_key = general_purpose::URL_SAFE_NO_PAD.encode(raw_public_key);
+    let public_key = base64::encode_config(raw_public_key, base64::URL_SAFE_NO_PAD);
     fs::write(PUBLIC_KEY_PATH, &public_key)?;
 
     Ok(())

@@ -157,7 +157,7 @@ async fn test_subscription_matching_performance() {
         "Performance test content".to_string(),
     );
     let event = unsigned_event
-        .sign(&sender_keys)
+        .sign_with_keys(&sender_keys)
         .expect("Failed to sign event");
     println!("Event creation time: {:?}", event_creation_start.elapsed());
 

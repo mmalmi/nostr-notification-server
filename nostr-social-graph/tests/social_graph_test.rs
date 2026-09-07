@@ -25,12 +25,12 @@ fn create_follow_event_with_timestamp(pubkey: &str, followed_pubkey: &str, creat
         public_key,
         created_at.into(),
         Kind::ContactList,
-        vec![Tag::parse(&["p", &followed_key.to_string()]).unwrap()],
+        vec![Tag::parse(["p", &followed_key.to_string()]).unwrap()],
         String::new(),
     );
     
     let keys = Keys::new(secret_key);
-    unsigned_event.sign(&keys).unwrap()
+    unsigned_event.sign_with_keys(&keys).unwrap()
 }
 
 fn create_follow_event(pubkey: &str, followed_pubkey: &str) -> Event {

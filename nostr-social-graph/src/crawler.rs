@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 use nostr_sdk::nostr::{Filter, Kind, Timestamp, PublicKey};
-use nostr_sdk::{Client, Keys, Options, EventSource};
+use nostr_sdk::{Client, Keys};
 use tokio::time::sleep;
 use log::{info, error, warn, debug};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -29,11 +29,7 @@ impl Crawler {
         // Generate new keys for the client
         let keys = Keys::generate();
         
-        // Create client with custom options
-        let opts = Options::new()
-            .wait_for_send(true)
-            .connection_timeout(Some(Duration::from_secs(10)));
-        let client = Client::with_opts(&keys, opts);
+        let client = Client::new(keys);
 
         Ok(Self {
             client,
@@ -53,6 +49,7 @@ impl Crawler {
             }
         }
         self.client.connect().await;
+        self.client.wait_for_connection(Duration::from_secs(10)).await;
         info!("Connected to relays");
 
         // Get root pubkey
@@ -74,9 +71,9 @@ impl Crawler {
             .kind(Kind::ContactList)
             .limit(1);
 
-        let events = self.client.get_events_of(
-            vec![filter],
-            EventSource::relays(Some(Duration::from_secs(10)))
+        let events = self.client.fetch_events(
+            filter,
+            Duration::from_secs(10),
         ).await?;
 
         if let Some(event) = events.first() {
@@ -115,9 +112,9 @@ impl Crawler {
 
             let events = match tokio::time::timeout(
                 Duration::from_secs(5),
-                self.client.get_events_of(
-                    vec![filter],
-                    EventSource::relays(Some(Duration::from_secs(3)))
+                self.client.fetch_events(
+                    filter,
+                    Duration::from_secs(3),
                 )
             ).await {
                 Ok(Ok(events)) => {
@@ -207,6 +204,7 @@ impl Crawler {
             }
         }
         self.client.connect().await;
+        self.client.wait_for_connection(Duration::from_secs(10)).await;
         info!("Connected to relays");
 
         // Get all pubkeys that need profile updates
@@ -235,9 +233,9 @@ impl Crawler {
 
             let events = match tokio::time::timeout(
                 Duration::from_secs(5),
-                self.client.get_events_of(
-                    vec![filter],
-                    EventSource::relays(Some(Duration::from_secs(3)))
+                self.client.fetch_events(
+                    filter,
+                    Duration::from_secs(3),
                 )
             ).await {
                 Ok(Ok(events)) => events,

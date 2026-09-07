@@ -47,9 +47,9 @@ pub async fn run_nostr_client(
         info!("No previous last event time found, starting fresh");
     }
 
-    let relay_pool = RelayPool::new(
-        RelayPoolOptions::new().notification_channel_size(NOTIFICATION_CHANNEL_SIZE),
-    );
+    let relay_pool = RelayPool::builder()
+        .opts(RelayPoolOptions::new().notification_channel_size(NOTIFICATION_CHANNEL_SIZE))
+        .build();
     info!(
         "Created relay pool with notification channel size {}",
         NOTIFICATION_CHANNEL_SIZE
@@ -68,7 +68,8 @@ pub async fn run_nostr_client(
             Err(_) => error!("Timeout connecting to relay: {}", relay_url),
         }
     }
-    relay_pool.connect(Some(Duration::from_secs(5))).await;
+    relay_pool.connect().await;
+    relay_pool.wait_for_connection(Duration::from_secs(5)).await;
     info!("Connected to relays");
 
     // Use last event time if available, otherwise start from now for regular events
@@ -145,7 +146,7 @@ pub async fn run_nostr_client(
                             if let Ok(elapsed) = startup_time.elapsed() {
                                 if elapsed < Duration::from_secs(60 * 2) {
                                     // Check if event timestamp is before startup time
-                                    if event.created_at.as_u64() <= startup_unix_time {
+                                    if event.created_at.as_secs() <= startup_unix_time {
                                         debug!("Skipping gift wrap event during startup period");
                                         continue;
                                     }
@@ -202,12 +203,12 @@ pub async fn run_nostr_client(
         save_last_event_time(&db_handler, last_event_time);
     }
 
-    relay_pool.shutdown().await?;
+    relay_pool.shutdown().await;
     Ok(())
 }
 
 fn event_age_secs(event: &Event) -> u64 {
-    current_unix_time().saturating_sub(event.created_at.as_u64())
+    current_unix_time().saturating_sub(event.created_at.as_secs())
 }
 
 fn current_unix_time() -> u64 {

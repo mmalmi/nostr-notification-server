@@ -61,7 +61,7 @@ impl ProfileHandler {
         }
 
         let pubkey = event.pubkey.to_hex();
-        let timestamp = event.created_at.as_u64();
+        let timestamp = event.created_at.as_secs();
 
         // Add debug logging for the content
         debug!("Processing profile event for {}: {}", pubkey, event.content);

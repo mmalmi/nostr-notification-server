@@ -162,7 +162,7 @@ impl SocialGraph {
         }
         
         let author = self.ids.get_or_create_id(&event.pubkey.to_hex())?;
-        let created_at = event.created_at.as_u64();
+        let created_at = event.created_at.as_secs();
         let current_time = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -183,7 +183,7 @@ impl SocialGraph {
         }
 
         let mut followed_in_event = HashSet::new();
-        for tag in &event.tags {
+        for tag in event.tags.iter() {
             if let Some(letter_tag) = tag.single_letter_tag() {
                 if letter_tag.as_char() == 'p' {
                     if let Some(pubkey) = tag.content() {
