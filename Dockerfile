@@ -1,5 +1,5 @@
 # Build stage
-FROM rust:1.88-slim-bullseye AS builder
+FROM rust:1.88-slim-bookworm AS builder
 
 # Install OpenSSL for VAPID key generation
 RUN apt-get update && apt-get install -y pkg-config libssl-dev
@@ -13,7 +13,7 @@ COPY . .
 RUN cargo build --release
 
 # Runtime stage
-FROM debian:bullseye-slim
+FROM debian:bookworm-slim
 
 # Install OpenSSL for runtime
 RUN apt-get update && apt-get install -y openssl ca-certificates \
