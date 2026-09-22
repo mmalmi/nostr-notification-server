@@ -578,6 +578,7 @@ pub async fn send_notifications(
     settings: Arc<Settings>,
     db_handler: Arc<DbHandler>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let background = subscription.is_background_event(&event);
     let mut tasks = Vec::new();
     let payload = create_notification_payload(&event, &settings, &db_handler).await;
     let now = current_unix_timestamp();
@@ -642,7 +643,10 @@ pub async fn send_notifications(
             continue;
         }
 
-        let target_key = format!("fcm:{fcm_token}");
+        let target_key = format!(
+            "fcm:{}:{fcm_token}",
+            if background { "background" } else { "alert" }
+        );
         if !queued_targets.insert(target_key.clone()) {
             debug!("Skipping duplicate FCM target");
             continue;
@@ -661,7 +665,7 @@ pub async fn send_notifications(
         let payload = payload.clone();
         let settings = settings.clone();
         tasks.push(tokio::spawn(async move {
-            send_fcm_push(&fcm_token, &payload, &settings)
+            send_fcm_push(&fcm_token, &payload, &settings, background)
                 .await
                 .map(|should_remove| NotificationTargetRemoval {
                     web_push_endpoint: None,
@@ -677,7 +681,10 @@ pub async fn send_notifications(
             continue;
         }
 
-        let target_key = format!("apns:{apns_token}");
+        let target_key = format!(
+            "apns:{}:{apns_token}",
+            if background { "background" } else { "alert" }
+        );
         if !queued_targets.insert(target_key.clone()) {
             debug!("Skipping duplicate APNS target");
             continue;
@@ -704,6 +711,7 @@ pub async fn send_notifications(
                 &settings,
                 apns_topic.as_deref(),
                 apns_environment.as_deref(),
+                background,
             )
             .await
             .map(|should_remove| NotificationTargetRemoval {
@@ -966,6 +974,7 @@ mod tests {
             apns_tokens: Vec::new(),
             apns_topic: None,
             apns_environment: None,
+            background_authors: Vec::new(),
             social_graph_filter: false,
             filter: filter(Some(vec![sender.clone()]), Some(vec![1]), tags),
             filters: Vec::new(),
@@ -1013,6 +1022,7 @@ mod tests {
             apns_tokens: Vec::new(),
             apns_topic: None,
             apns_environment: None,
+            background_authors: Vec::new(),
             social_graph_filter: false,
             filter: filter(None, Some(vec![1]), tags),
             filters: Vec::new(),
@@ -1050,6 +1060,7 @@ mod tests {
             apns_tokens: Vec::new(),
             apns_topic: None,
             apns_environment: None,
+            background_authors: Vec::new(),
             social_graph_filter: true,
             filter: filter(None, Some(vec![1]), tags),
             filters: Vec::new(),
@@ -1105,6 +1116,7 @@ mod tests {
             apns_tokens: Vec::new(),
             apns_topic: None,
             apns_environment: None,
+            background_authors: Vec::new(),
             social_graph_filter: false,
             filter: filter(None, Some(vec![1]), tags),
             filters: Vec::new(),
@@ -1146,6 +1158,7 @@ mod tests {
                 apns_tokens: Vec::new(),
                 apns_topic: None,
                 apns_environment: None,
+                background_authors: Vec::new(),
                 social_graph_filter: true,
                 filter: filter(Some(vec![sender]), Some(vec![kind]), BTreeMap::new()),
                 filters: Vec::new(),
@@ -1194,6 +1207,7 @@ mod tests {
             apns_tokens: Vec::new(),
             apns_topic: None,
             apns_environment: None,
+            background_authors: Vec::new(),
             social_graph_filter: false,
             filter: filter(Some(vec![sender]), Some(vec![1060]), BTreeMap::new()),
             filters: Vec::new(),

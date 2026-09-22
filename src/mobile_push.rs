@@ -47,6 +47,7 @@ pub async fn send_fcm_push(
     token: &str,
     payload: &NotificationPayload,
     settings: &Settings,
+    background: bool,
 ) -> Result<bool, Box<dyn Error + Send + Sync>> {
     let account = match load_fcm_service_account(settings)? {
         Some(account) => account,
@@ -65,13 +66,14 @@ pub async fn send_fcm_push(
             "token": token,
             "data": {
                 "event": event_json,
+                "background": if background { "true" } else { "false" },
                 "title": payload.title,
                 "body": payload.body,
                 "icon": payload.icon,
                 "url": payload.url,
             },
             "android": {
-                "priority": "HIGH"
+                "priority": if background { "NORMAL" } else { "HIGH" }
             }
         }
     });
@@ -106,6 +108,7 @@ pub async fn send_apns_push(
     settings: &Settings,
     subscription_topic: Option<&str>,
     subscription_environment: Option<&str>,
+    background: bool,
 ) -> Result<bool, Box<dyn Error + Send + Sync>> {
     let topic = match trimmed_non_empty(subscription_topic)
         .or_else(|| trimmed_non_empty(settings.apns_topic.as_deref()))
@@ -141,7 +144,7 @@ pub async fn send_apns_push(
         &EncodingKey::from_ec_pem(auth_key_pem.as_bytes())?,
     )?;
 
-    let request_body = build_apns_request_body(payload);
+    let request_body = build_apns_request_body(payload, background);
     let request_body_bytes = serde_json::to_vec(&request_body)?;
     let payload_size = request_body_bytes.len();
 
@@ -167,8 +170,11 @@ pub async fn send_apns_push(
         .post(&endpoint)
         .header("authorization", format!("bearer {}", jwt))
         .header("apns-topic", topic)
-        .header("apns-push-type", "alert")
-        .header("apns-priority", "10")
+        .header(
+            "apns-push-type",
+            if background { "background" } else { "alert" },
+        )
+        .header("apns-priority", if background { "5" } else { "10" })
         .header("content-type", "application/json")
         .body(request_body_bytes);
     let response = request.send().await.map_err(|error| {
@@ -205,7 +211,13 @@ pub async fn send_apns_push(
     Ok(should_remove)
 }
 
-fn build_apns_request_body(payload: &NotificationPayload) -> serde_json::Value {
+fn build_apns_request_body(payload: &NotificationPayload, background: bool) -> serde_json::Value {
+    if background {
+        return json!({
+            "aps": { "content-available": 1 },
+            "event": compact_event_payload_for_apns(&payload.event),
+        });
+    }
     json!({
         "aps": {
             "alert": {
@@ -454,6 +466,31 @@ mod tests {
     use std::collections::HashMap;
 
     #[test]
+    fn own_device_push_has_no_alert_sound_or_badge() {
+        let event = EventBuilder::new(Kind::from(1060), "encrypted sync")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let payload = NotificationPayload {
+            event: EventPayload::Full(Box::new(event.clone())),
+            title: "New message".into(),
+            body: "New message".into(),
+            icon: String::new(),
+            url: String::new(),
+        };
+        let body = build_apns_request_body(&payload, true);
+        assert_eq!(body["aps"], json!({"content-available": 1}));
+        assert!(body.get("title").is_none());
+        assert!(body.get("body").is_none());
+        assert_eq!(
+            serde_json::from_value::<Event>(body["event"].clone()).unwrap(),
+            event
+        );
+        let alert = build_apns_request_body(&payload, false);
+        assert!(alert["aps"]["alert"].is_object());
+        assert_eq!(alert["aps"]["sound"], "default");
+    }
+
+    #[test]
     fn apns_preserves_signed_event_with_recipient_and_other_tags() {
         let event = EventBuilder::new(Kind::from(1060), "encrypted message")
             .tags([
@@ -472,7 +509,7 @@ mod tests {
             url: String::new(),
         };
 
-        let body = build_apns_request_body(&payload);
+        let body = build_apns_request_body(&payload, false);
         let received: Event = serde_json::from_value(body["event"].clone()).unwrap();
         received
             .verify()
@@ -533,7 +570,7 @@ mod tests {
             url: "https://example.com/note".to_string(),
         };
 
-        let request_body = build_apns_request_body(&payload);
+        let request_body = build_apns_request_body(&payload, false);
 
         assert_eq!(
             request_body["aps"],
@@ -564,7 +601,7 @@ mod tests {
             url: "https://example.com/note".to_string(),
         };
 
-        let request_body = build_apns_request_body(&payload);
+        let request_body = build_apns_request_body(&payload, false);
 
         assert_eq!(request_body["event"]["kind"].as_u64().unwrap(), 1060);
         assert_eq!(

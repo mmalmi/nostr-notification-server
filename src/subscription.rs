@@ -21,6 +21,9 @@ pub struct Subscription {
     pub apns_topic: Option<String>,
     #[serde(default)]
     pub apns_environment: Option<String>,
+    /// Encrypted event authors the subscriber wants delivered without an alert.
+    #[serde(default)]
+    pub background_authors: Vec<String>,
     #[serde(default)]
     pub social_graph_filter: bool,
     pub filter: SubscriptionFilter,
@@ -103,6 +106,7 @@ impl Subscription {
             apns_tokens: Vec::new(),
             apns_topic: None,
             apns_environment: None,
+            background_authors: Vec::new(),
             social_graph_filter: false,
             filter,
             filters: Vec::new(),
@@ -126,7 +130,15 @@ impl Subscription {
         self.matches_any_filter(event)
     }
 
+    pub fn is_background_event(&self, event: &Event) -> bool {
+        self.background_authors.contains(&event.pubkey.to_hex())
+    }
+
     pub fn merge(&mut self, other: Subscription) {
+        self.background_authors
+            .extend(other.background_authors.iter().cloned());
+        self.background_authors.sort();
+        self.background_authors.dedup();
         self.webhooks.extend(other.webhooks);
 
         for new_sub in other.web_push_subscriptions {
@@ -211,6 +223,7 @@ mod tests {
             apns_tokens: Vec::new(),
             apns_topic: None,
             apns_environment: None,
+            background_authors: Vec::new(),
             social_graph_filter: false,
             filter: filter(
                 Some(vec![message_keys.public_key().to_hex()]),
@@ -236,5 +249,33 @@ mod tests {
         assert!(subscription.matches_event(&message_event));
         assert!(subscription.matches_event(&invite_event));
         assert!(!subscription.matches_event(&unrelated_event));
+    }
+}
+
+#[cfg(test)]
+mod background_tests {
+    use super::*;
+    use nostr_sdk::{EventBuilder, Keys, Kind};
+
+    #[test]
+    fn only_explicit_background_authors_are_silent_and_survive_storage() {
+        let own = Keys::generate();
+        let peer = Keys::generate();
+        let mut subscription: Subscription = serde_json::from_value(serde_json::json!({
+            "filter": { "kinds": [1060], "authors": [own.public_key().to_hex(), peer.public_key().to_hex()] }
+        })).unwrap();
+        let own_event = EventBuilder::new(Kind::from(1060), "sync")
+            .sign_with_keys(&own)
+            .unwrap();
+        let peer_event = EventBuilder::new(Kind::from(1060), "message")
+            .sign_with_keys(&peer)
+            .unwrap();
+        assert!(!subscription.is_background_event(&own_event));
+        subscription.background_authors = vec![own.public_key().to_hex()];
+        let restored = Subscription::deserialize(&subscription.serialize().unwrap()).unwrap();
+        assert!(restored.matches_event(&own_event));
+        assert!(restored.is_background_event(&own_event));
+        assert!(restored.matches_event(&peer_event));
+        assert!(!restored.is_background_event(&peer_event));
     }
 }

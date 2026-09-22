@@ -708,6 +708,7 @@ async fn test_mobile_subscription_endpoints(client: &Client) {
 
 async fn test_mobile_push_delivery(
     client: &Client,
+    background: bool,
     received_fcm: Arc<Mutex<Vec<serde_json::Value>>>,
     received_apns: Arc<Mutex<Vec<serde_json::Value>>>,
 ) {
@@ -724,6 +725,7 @@ async fn test_mobile_push_delivery(
         "web_push_subscriptions": [],
         "fcm_tokens": [fcm_token],
         "apns_tokens": [apns_token],
+        "background_authors": if background { vec![sender_keys.public_key().to_hex()] } else { Vec::<String>::new() },
         "filter": {
             "kinds": [1060],
             "#p": [pubkey.clone()]
@@ -744,7 +746,7 @@ async fn test_mobile_push_delivery(
         Timestamp::now(),
         Kind::from(1060),
         vec![Tag::public_key(subscriber_keys.public_key())],
-        "ciphertext".to_string(),
+        if background { "sync" } else { "ciphertext" }.to_string(),
     )
     .sign_with_keys(&sender_keys)
     .expect("Failed to sign mobile push test event");
@@ -768,6 +770,11 @@ async fn test_mobile_push_delivery(
         "Bearer test-fcm-access-token"
     );
     assert_eq!(fcm["body"]["message"]["token"].as_str().unwrap(), fcm_token);
+    assert_eq!(
+        fcm["body"]["message"]["android"]["priority"],
+        if background { "NORMAL" } else { "HIGH" }
+    );
+    assert!(fcm["body"]["message"].get("notification").is_none());
     let fcm_event = serde_json::from_str::<serde_json::Value>(
         fcm["body"]["message"]["data"]["event"].as_str().unwrap(),
     )
@@ -780,8 +787,14 @@ async fn test_mobile_push_delivery(
     let apns = &apns_requests[0];
     assert_eq!(apns["token"].as_str().unwrap(), apns_token);
     assert_eq!(apns["headers"]["apns-topic"].as_str().unwrap(), "to.iris");
-    assert_eq!(apns["headers"]["apns-push-type"].as_str().unwrap(), "alert");
-    assert_eq!(apns["headers"]["apns-priority"].as_str().unwrap(), "10");
+    assert_eq!(
+        apns["headers"]["apns-push-type"].as_str().unwrap(),
+        if background { "background" } else { "alert" }
+    );
+    assert_eq!(
+        apns["headers"]["apns-priority"].as_str().unwrap(),
+        if background { "5" } else { "10" }
+    );
     assert_eq!(
         apns["body"]["event"]["id"].as_str().unwrap(),
         event.id.to_hex()
@@ -793,8 +806,16 @@ async fn test_mobile_push_delivery(
     );
     assert_eq!(
         apns["body"]["event"]["content"].as_str().unwrap(),
-        "ciphertext"
+        if background { "sync" } else { "ciphertext" }
     );
+    if background {
+        assert_eq!(
+            apns["body"]["aps"],
+            serde_json::json!({"content-available": 1})
+        );
+        assert!(apns["body"].get("body").is_none());
+        return;
+    }
     assert_eq!(apns["body"]["aps"]["mutable-content"].as_u64().unwrap(), 1);
     assert_eq!(apns["body"]["aps"]["sound"].as_str().unwrap(), "default");
     assert_eq!(
@@ -1559,7 +1580,8 @@ async fn test_integration() {
     )
     .await;
     test_mobile_subscription_endpoints(&client).await;
-    test_mobile_push_delivery(&client, received_fcm.clone(), received_apns.clone()).await;
+    test_mobile_push_delivery(&client, false, received_fcm.clone(), received_apns.clone()).await;
+    test_mobile_push_delivery(&client, true, received_fcm.clone(), received_apns.clone()).await;
     test_mobile_push_token_moves_between_subscriptions(
         &client,
         received_fcm.clone(),

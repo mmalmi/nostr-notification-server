@@ -1293,6 +1293,7 @@ mod tests {
             apns_tokens: Vec::new(),
             apns_topic: None,
             apns_environment: None,
+            background_authors: Vec::new(),
             social_graph_filter: false,
             filter: filter(
                 Some(vec![author.clone()]),
