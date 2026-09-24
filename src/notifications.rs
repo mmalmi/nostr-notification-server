@@ -314,6 +314,14 @@ pub async fn handle_incoming_event(
     settings: &Settings,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let start = Instant::now();
+    if event.kind.as_u16() == 21_111 {
+        let now = current_unix_timestamp();
+        if event.created_at.as_secs() > now.saturating_add(5)
+            || now.saturating_sub(event.created_at.as_secs()) > 40
+        {
+            return Ok(());
+        }
+    }
     let updates_local_state = event.kind == Kind::Metadata
         || (event.kind == Kind::ContactList && settings.use_social_graph)
         || event.kind.as_u16() == 10_000;
@@ -645,7 +653,13 @@ pub async fn send_notifications(
 
         let target_key = format!(
             "fcm:{}:{fcm_token}",
-            if background { "background" } else { "alert" }
+            if event.kind.as_u16() == 21_111 {
+                "call"
+            } else if background {
+                "background"
+            } else {
+                "alert"
+            }
         );
         if !queued_targets.insert(target_key.clone()) {
             debug!("Skipping duplicate FCM target");

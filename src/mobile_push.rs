@@ -61,7 +61,39 @@ pub async fn send_fcm_push(
         base_url, account.project_id
     );
     let event_json = fcm_event_payload_json(&payload.event)?;
-    let request_body = json!({
+    let request_body = build_fcm_request_body(token, payload, background, event_json);
+
+    debug!("Sending FCM push for token {}", abbreviate_token(token));
+    let response = reqwest::Client::new()
+        .post(endpoint)
+        .bearer_auth(access_token)
+        .json(&request_body)
+        .send()
+        .await?;
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+
+    if status.is_success() {
+        return Ok(false);
+    }
+    let should_remove = should_remove_fcm_token(status, &body);
+    warn!(
+        "FCM push failed for token {} with status {}: {}",
+        abbreviate_token(token),
+        status,
+        body
+    );
+    Ok(should_remove)
+}
+
+fn build_fcm_request_body(
+    token: &str,
+    payload: &NotificationPayload,
+    background: bool,
+    event_json: String,
+) -> serde_json::Value {
+    let call = is_call_wakeup(&payload.event);
+    let mut body = json!({
         "message": {
             "token": token,
             "data": {
@@ -78,28 +110,18 @@ pub async fn send_fcm_push(
         }
     });
 
-    debug!("Sending FCM push for token {}", abbreviate_token(token));
-    let response = reqwest::Client::new()
-        .post(endpoint)
-        .bearer_auth(access_token)
-        .json(&request_body)
-        .send()
-        .await?;
-    let status = response.status();
-    let body = response.text().await.unwrap_or_default();
-
-    if status.is_success() {
-        return Ok(false);
+    if call {
+        body["message"]["android"]["priority"] = "HIGH".into();
+        body["message"]["android"]["ttl"] = "0s".into();
     }
+    body
+}
 
-    let should_remove = should_remove_fcm_token(status, &body);
-    warn!(
-        "FCM push failed for token {} with status {}: {}",
-        abbreviate_token(token),
-        status,
-        body
-    );
-    Ok(should_remove)
+fn is_call_wakeup(event: &EventPayload) -> bool {
+    match event {
+        EventPayload::Full(event) => event.kind.as_u16() == 21_111,
+        EventPayload::Details(event) => event.kind == 21_111,
+    }
 }
 
 pub async fn send_apns_push(
@@ -116,8 +138,13 @@ pub async fn send_apns_push(
         Some(value) => value,
         None => return Ok(false),
     };
+    let voip = topic.ends_with(".voip");
+    // PushKit is exclusively for live call invitations, never chat traffic.
+    if voip != is_call_wakeup(&payload.event) {
+        return Ok(false);
+    }
     let (key_id, team_id, auth_key) = match resolve_apns_credentials(
-        topic,
+        topic.strip_suffix(".voip").unwrap_or(topic),
         &settings.apns_credentials,
         settings.apns_topic.as_deref(),
         settings.apns_key_id.as_deref(),
@@ -144,7 +171,7 @@ pub async fn send_apns_push(
         &EncodingKey::from_ec_pem(auth_key_pem.as_bytes())?,
     )?;
 
-    let request_body = build_apns_request_body(payload, background);
+    let request_body = build_apns_request_body(payload, background || voip);
     let request_body_bytes = serde_json::to_vec(&request_body)?;
     let payload_size = request_body_bytes.len();
 
@@ -166,17 +193,29 @@ pub async fn send_apns_push(
         abbreviate_token(token),
         payload_size
     );
-    let request = client
+    let mut request = client
         .post(&endpoint)
         .header("authorization", format!("bearer {}", jwt))
         .header("apns-topic", topic)
         .header(
             "apns-push-type",
-            if background { "background" } else { "alert" },
+            if voip {
+                "voip"
+            } else if background {
+                "background"
+            } else {
+                "alert"
+            },
         )
-        .header("apns-priority", if background { "5" } else { "10" })
+        .header(
+            "apns-priority",
+            if background && !voip { "5" } else { "10" },
+        )
         .header("content-type", "application/json")
         .body(request_body_bytes);
+    if voip {
+        request = request.header("apns-expiration", "0");
+    }
     let response = request.send().await.map_err(|error| {
         format!(
             "APNS request failed for token {} (payload_bytes={}, connect={}, timeout={}): {}",

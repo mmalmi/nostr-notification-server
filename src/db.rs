@@ -266,6 +266,7 @@ impl DbHandler {
             self.evict_push_target_owners(
                 &mut wtxn,
                 id,
+                &stored_subscription,
                 &claimed_web_push_endpoints,
                 &claimed_fcm_tokens,
                 &claimed_apns_tokens,
@@ -469,6 +470,7 @@ impl DbHandler {
         &self,
         wtxn: &mut heed::RwTxn<'_>,
         current_id: &str,
+        current_subscription: &Subscription,
         claimed_web_push_endpoints: &HashSet<String>,
         claimed_fcm_tokens: &HashSet<String>,
         claimed_apns_tokens: &HashSet<String>,
@@ -503,6 +505,14 @@ impl DbHandler {
             };
 
             let original_sub = Subscription::deserialize(bytes)?;
+            // One FCM token serves both calls and messages. Keep those separate
+            // filters for the same account; account switches still evict both.
+            if original_sub.subscriber == current_subscription.subscriber
+                && original_sub.is_call_subscription()
+                    != current_subscription.is_call_subscription()
+            {
+                continue;
+            }
             let mut other_sub = original_sub.clone();
             let mut web_push_changed =
                 normalize_web_push_subscription_list(&mut other_sub.web_push_subscriptions);
@@ -615,8 +625,12 @@ impl DbHandler {
         };
 
         let mut owner_by_web_push_endpoint = HashMap::new();
+        let mut account_by_fcm_token = HashMap::new();
+        let mut account_by_apns_token = HashMap::new();
         let mut owner_by_fcm_token = HashMap::new();
+        let mut owner_by_call_fcm_token = HashMap::new();
         let mut owner_by_apns_token = HashMap::new();
+        let mut owner_by_call_apns_token = HashMap::new();
         let mut wtxn = self.env.write_txn()?;
         self.subscriptions_by_web_push_endpoint_and_id
             .clear(&mut wtxn)?;
@@ -634,14 +648,35 @@ impl DbHandler {
                 &mut owner_by_web_push_endpoint,
                 &id,
             );
+            let call_subscription = subscription.is_call_subscription();
+            // Channels may share a token only within the same account, including
+            // when repairing indices created by an older server version.
             changed |= retain_first_push_token_owner(
                 &mut subscription.fcm_tokens,
-                &mut owner_by_fcm_token,
+                &mut account_by_fcm_token,
+                &subscription.subscriber,
+            );
+            changed |= retain_first_push_token_owner(
+                &mut subscription.apns_tokens,
+                &mut account_by_apns_token,
+                &subscription.subscriber,
+            );
+            changed |= retain_first_push_token_owner(
+                &mut subscription.fcm_tokens,
+                if call_subscription {
+                    &mut owner_by_call_fcm_token
+                } else {
+                    &mut owner_by_fcm_token
+                },
                 &id,
             );
             changed |= retain_first_push_token_owner(
                 &mut subscription.apns_tokens,
-                &mut owner_by_apns_token,
+                if call_subscription {
+                    &mut owner_by_call_apns_token
+                } else {
+                    &mut owner_by_apns_token
+                },
                 &id,
             );
 
@@ -1268,6 +1303,40 @@ mod tests {
             search: None,
             tags,
         }
+    }
+
+    #[test]
+    fn call_and_message_tokens_coexist_but_account_switch_revokes_both(
+    ) -> Result<(), Box<dyn StdError + Send + Sync>> {
+        let unique = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let path = std::env::temp_dir().join(format!("call-push-token-{unique}"));
+        let settings = test_settings(path.to_string_lossy().into());
+        let db = DbHandler::new(&settings)?;
+        let message: Subscription = serde_json::from_value(serde_json::json!({
+            "subscriber":"alice", "filter":{"kinds":[1060]}, "fcm_tokens":["shared-token"]
+        }))?;
+        let mut call = message.clone();
+        call.filter.kinds = Some(vec![21111]);
+        db.save_subscription("alice", "messages", &message)?;
+        db.save_subscription("alice", "calls", &call)?;
+        assert!(db.get_subscription("alice", "messages")?.is_some());
+        assert!(db.get_subscription("alice", "calls")?.is_some());
+        db.save_subscription("alice", "messages", &message)?;
+        assert!(db.get_subscription("alice", "calls")?.is_some());
+        db.rebuild_push_target_indices()?;
+        assert!(db.get_subscription("alice", "messages")?.is_some());
+        assert!(db.get_subscription("alice", "calls")?.is_some());
+        drop(db);
+        let db = DbHandler::new(&settings)?;
+        assert!(db.get_subscription("alice", "messages")?.is_some());
+        assert!(db.get_subscription("alice", "calls")?.is_some());
+        call.subscriber = "bob".into();
+        db.save_subscription("bob", "new-account", &call)?;
+        assert!(db.get_subscription("alice", "messages")?.is_none());
+        assert!(db.get_subscription("alice", "calls")?.is_none());
+        drop(db);
+        std::fs::remove_dir_all(path)?;
+        Ok(())
     }
 
     #[test]

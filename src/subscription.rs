@@ -130,6 +130,11 @@ impl Subscription {
         self.matches_any_filter(event)
     }
 
+    pub fn is_call_subscription(&self) -> bool {
+        self.effective_filters()
+            .all(|filter| filter.kinds.as_deref() == Some(&[21_111]))
+    }
+
     pub fn is_background_event(&self, event: &Event) -> bool {
         self.background_authors.contains(&event.pubkey.to_hex())
     }
