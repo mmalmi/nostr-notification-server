@@ -580,7 +580,7 @@ fn push_notification_job(
 }
 
 pub async fn send_notifications(
-    mut subscription: Subscription,
+    subscription: Subscription,
     subscription_id: &str,
     event: Event,
     settings: Arc<Settings>,
@@ -765,33 +765,13 @@ pub async fn send_notifications(
         || !fcm_tokens_to_remove.is_empty()
         || !apns_tokens_to_remove.is_empty()
     {
-        subscription.web_push_subscriptions.retain(|sub| {
-            !endpoints_to_remove
-                .iter()
-                .any(|endpoint| endpoint == sub.endpoint.trim())
-        });
-        subscription.fcm_tokens.retain(|token| {
-            !fcm_tokens_to_remove
-                .iter()
-                .any(|removed| removed == token.trim())
-        });
-        subscription.apns_tokens.retain(|token| {
-            !apns_tokens_to_remove
-                .iter()
-                .any(|removed| removed == token.trim())
-        });
-
-        if !subscription.is_empty() {
-            db_handler.save_subscription(
-                &subscription.subscriber,
-                subscription_id,
-                &subscription,
-            )?;
-        }
-    }
-
-    if subscription.is_empty() {
-        db_handler.delete_subscription(&subscription.subscriber, subscription_id)?;
+        db_handler.remove_invalid_push_targets(
+            subscription_id,
+            &subscription,
+            &endpoints_to_remove,
+            &fcm_tokens_to_remove,
+            &apns_tokens_to_remove,
+        )?;
     }
 
     Ok(())
@@ -868,6 +848,158 @@ mod tests {
             search: None,
             tags,
         }
+    }
+
+    async fn invalid_apns_cleanup_after_update(
+        update: impl FnOnce(&mut Subscription) -> bool,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        use p256::pkcs8::EncodePrivateKey;
+
+        let path = std::env::temp_dir().join(format!("push-cleanup-{}", uuid::Uuid::new_v4()));
+        let mut settings = test_settings(path.to_string_lossy().into_owned());
+        let db = Arc::new(DbHandler::new(&settings)?);
+        let sender = Keys::generate();
+        let allowed_sender = Keys::generate();
+        let subscriber = Keys::generate().public_key().to_hex();
+        let original: Subscription = serde_json::from_value(serde_json::json!({
+            "subscriber": subscriber,
+            "filter": {
+                "kinds": [21111],
+                "authors": [sender.public_key().to_hex(), allowed_sender.public_key().to_hex()]
+            },
+            "apns_tokens": ["invalid-token"],
+            "apns_topic": "test.voip",
+            "fcm_tokens": ["existing-token"]
+        }))?;
+        db.save_subscription(&subscriber, "calls", &original)?;
+        let mut latest = original.clone();
+        // A block removes the caller while APNs is processing the older request.
+        latest.filter.authors = Some(vec![allowed_sender.public_key().to_hex()]);
+        let deleted = update(&mut latest);
+        let expected = if deleted {
+            None
+        } else {
+            let mut expected = latest.clone();
+            if expected.apns_topic == original.apns_topic
+                && expected.apns_environment == original.apns_environment
+            {
+                expected
+                    .apns_tokens
+                    .retain(|token| token != "invalid-token");
+            }
+            (!expected.is_empty()).then_some(expected)
+        };
+
+        let handler_db = db.clone();
+        let handler_subscriber = subscriber.clone();
+        let route = warp::post().map(move || {
+            if deleted {
+                handler_db
+                    .delete_subscription(&handler_subscriber, "calls")
+                    .unwrap();
+            } else {
+                handler_db
+                    .save_subscription(&handler_subscriber, "calls", &latest)
+                    .unwrap();
+            }
+            warp::reply::with_status(
+                warp::reply::json(&serde_json::json!({"reason": "Unregistered"})),
+                warp::http::StatusCode::GONE,
+            )
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        settings.apns_api_base_url = format!("http://{}", listener.local_addr()?);
+        settings.apns_key_id = Some("test-key".into());
+        settings.apns_team_id = Some("test-team".into());
+        settings.apns_topic = Some("test".into());
+        settings.apns_auth_key = Some(
+            p256::SecretKey::random(&mut rand::thread_rng())
+                .to_pkcs8_pem(Default::default())?
+                .to_string(),
+        );
+        let server = tokio::spawn(warp::serve(route).incoming(listener).run());
+        let event =
+            EventBuilder::new(Kind::from(21111), "encrypted call offer").sign_with_keys(&sender)?;
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            send_notifications(
+                original,
+                "calls",
+                event.clone(),
+                Arc::new(settings),
+                db.clone(),
+            ),
+        )
+        .await;
+        server.abort();
+        let _ = server.await;
+        result??;
+
+        let stored = db.get_subscription(&subscriber, "calls")?;
+        assert_eq!(
+            serde_json::to_value(&stored)?,
+            serde_json::to_value(&expected)?,
+            "invalid-token cleanup must retain the latest block filter and targets"
+        );
+        assert!(
+            db.get_subscriptions_by_author(&sender.public_key().to_hex())?
+                .is_empty(),
+            "cleanup must not restore the blocked caller's author index"
+        );
+        assert_eq!(
+            db.get_subscriptions_by_author(&allowed_sender.public_key().to_hex())?
+                .len(),
+            usize::from(expected.is_some())
+        );
+        drop(db);
+        std::fs::remove_dir_all(path)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn invalid_apns_cleanup_preserves_new_block_filter_and_targets(
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        invalid_apns_cleanup_after_update(|latest| {
+            latest.fcm_tokens.push("new-token".into());
+            false
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn invalid_apns_cleanup_does_not_recreate_deleted_subscription(
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        invalid_apns_cleanup_after_update(|_| true).await
+    }
+
+    #[tokio::test]
+    async fn invalid_apns_cleanup_deletes_only_when_latest_subscription_is_empty(
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        invalid_apns_cleanup_after_update(|latest| {
+            latest.fcm_tokens.clear();
+            false
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn invalid_apns_cleanup_preserves_replacement_token(
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        invalid_apns_cleanup_after_update(|latest| {
+            latest.apns_tokens = vec!["replacement-token".into()];
+            false
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn invalid_apns_cleanup_preserves_token_registered_for_new_environment(
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        invalid_apns_cleanup_after_update(|latest| {
+            latest.apns_environment = Some("development".into());
+            false
+        })
+        .await
     }
 
     #[tokio::test]

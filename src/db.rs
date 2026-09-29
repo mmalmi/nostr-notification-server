@@ -308,6 +308,79 @@ impl DbHandler {
         Ok(existed)
     }
 
+    /// Apply delivery failures to the current record without restoring an older
+    /// caller filter, overwriting new targets, or recreating a deleted record.
+    pub fn remove_invalid_push_targets(
+        &self,
+        id: &str,
+        attempted: &Subscription,
+        web_push_endpoints: &[String],
+        fcm_tokens: &[String],
+        apns_tokens: &[String],
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut wtxn = self.env.write_txn()?;
+        let Some(bytes) = self.subscriptions.get(&wtxn, id)? else {
+            return Ok(());
+        };
+        let current = Subscription::deserialize(bytes)?;
+        if current.subscriber != attempted.subscriber {
+            return Ok(());
+        }
+
+        let mut updated = current.clone();
+        updated.web_push_subscriptions.retain(|target| {
+            !web_push_endpoints
+                .iter()
+                .any(|endpoint| endpoint == target.endpoint.trim())
+                || !attempted.web_push_subscriptions.iter().any(|old| {
+                    old.endpoint.trim() == target.endpoint.trim()
+                        && old.auth == target.auth
+                        && old.p256dh == target.p256dh
+                })
+        });
+        // Mobile tokens have no registration generation in the stored schema.
+        // Changed tokens/channels are preserved; identical re-registrations are
+        // indistinguishable from the target used by the failed attempt.
+        if current.is_call_subscription() == attempted.is_call_subscription() {
+            updated.fcm_tokens.retain(|token| {
+                !fcm_tokens.iter().any(|invalid| invalid == token.trim())
+                    || !attempted
+                        .fcm_tokens
+                        .iter()
+                        .any(|old| old.trim() == token.trim())
+            });
+            if current.apns_topic == attempted.apns_topic
+                && current.apns_environment == attempted.apns_environment
+            {
+                updated.apns_tokens.retain(|token| {
+                    !apns_tokens.iter().any(|invalid| invalid == token.trim())
+                        || !attempted
+                            .apns_tokens
+                            .iter()
+                            .any(|old| old.trim() == token.trim())
+                });
+            }
+        }
+
+        if updated.web_push_subscriptions.len() == current.web_push_subscriptions.len()
+            && updated.fcm_tokens.len() == current.fcm_tokens.len()
+            && updated.apns_tokens.len() == current.apns_tokens.len()
+        {
+            return Ok(());
+        }
+
+        self.delete_subscription_indices(&mut wtxn, &current.subscriber, id, &current)?;
+        if updated.is_empty() {
+            self.subscriptions.delete(&mut wtxn, id)?;
+        } else {
+            self.subscriptions
+                .put(&mut wtxn, id, &updated.serialize()?)?;
+            self.put_subscription_indices(&mut wtxn, &updated.subscriber, id, &updated)?;
+        }
+        wtxn.commit()?;
+        Ok(())
+    }
+
     fn put_subscription_indices(
         &self,
         wtxn: &mut heed::RwTxn<'_>,
@@ -1303,6 +1376,96 @@ mod tests {
             search: None,
             tags,
         }
+    }
+
+    #[test]
+    fn invalid_target_cleanup_keeps_refreshed_web_credentials_and_new_fcm_targets(
+    ) -> Result<(), Box<dyn StdError + Send + Sync>> {
+        let path = std::env::temp_dir().join(format!("push-cleanup-{}", uuid::Uuid::new_v4()));
+        let db = DbHandler::new(&test_settings(path.to_string_lossy().into_owned()))?;
+        let attempted: Subscription = serde_json::from_value(serde_json::json!({
+            "subscriber": "alice", "filter": {"authors": ["blocked", "allowed"]},
+            "web_push_subscriptions": [
+                {"endpoint": "https://example.invalid/expired", "auth": "old", "p256dh": "old"},
+                {"endpoint": "https://example.invalid/refreshed", "auth": "old", "p256dh": "old"}
+            ],
+            "fcm_tokens": ["expired-fcm"]
+        }))?;
+        db.save_subscription("alice", "messages", &attempted)?;
+        let mut latest = attempted.clone();
+        latest.filter.authors = Some(vec!["allowed".into()]);
+        latest.web_push_subscriptions[1].auth = "new".into();
+        latest.web_push_subscriptions[1].p256dh = "new".into();
+        latest.fcm_tokens.push("new-fcm".into());
+        db.save_subscription("alice", "messages", &latest)?;
+
+        db.remove_invalid_push_targets(
+            "messages",
+            &attempted,
+            &[
+                "https://example.invalid/expired".into(),
+                "https://example.invalid/refreshed".into(),
+            ],
+            &["expired-fcm".into(), "new-fcm".into()],
+            &[],
+        )?;
+        latest.web_push_subscriptions.remove(0);
+        latest.fcm_tokens.remove(0);
+        assert_eq!(
+            serde_json::to_value(db.get_subscription("alice", "messages")?)?,
+            serde_json::to_value(Some(latest))?,
+        );
+        assert!(db.get_subscriptions_by_author("blocked")?.is_empty());
+        let rtxn = db.env.read_txn()?;
+        assert!(db
+            .subscriptions_by_web_push_endpoint_and_id
+            .get(
+                &rtxn,
+                &push_target_index_key("https://example.invalid/expired", "messages")
+            )?
+            .is_none());
+        assert!(db
+            .subscriptions_by_web_push_endpoint_and_id
+            .get(
+                &rtxn,
+                &push_target_index_key("https://example.invalid/refreshed", "messages")
+            )?
+            .is_some());
+        assert!(db
+            .subscriptions_by_fcm_token_and_id
+            .get(&rtxn, &push_target_index_key("expired-fcm", "messages"))?
+            .is_none());
+        assert!(db
+            .subscriptions_by_fcm_token_and_id
+            .get(&rtxn, &push_target_index_key("new-fcm", "messages"))?
+            .is_some());
+        drop(rtxn);
+        drop(db);
+        std::fs::remove_dir_all(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_target_cleanup_cannot_modify_recreated_subscription_for_another_account(
+    ) -> Result<(), Box<dyn StdError + Send + Sync>> {
+        let path = std::env::temp_dir().join(format!("push-cleanup-{}", uuid::Uuid::new_v4()));
+        let db = DbHandler::new(&test_settings(path.to_string_lossy().into_owned()))?;
+        let attempted: Subscription = serde_json::from_value(serde_json::json!({
+            "subscriber": "alice", "filter": {"kinds": [1060]}, "fcm_tokens": ["token"]
+        }))?;
+        db.save_subscription("alice", "messages", &attempted)?;
+        db.delete_subscription("alice", "messages")?;
+        let mut current = attempted.clone();
+        current.subscriber = "bob".into();
+        db.save_subscription("bob", "messages", &current)?;
+        db.remove_invalid_push_targets("messages", &attempted, &[], &["token".into()], &[])?;
+        assert_eq!(
+            serde_json::to_value(db.get_subscription("bob", "messages")?)?,
+            serde_json::to_value(Some(current))?,
+        );
+        drop(db);
+        std::fs::remove_dir_all(path)?;
+        Ok(())
     }
 
     #[test]
