@@ -846,6 +846,8 @@ mod tests {
             authors,
             kinds,
             search: None,
+            since: None,
+            until: None,
             tags,
         }
     }

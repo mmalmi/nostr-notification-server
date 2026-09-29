@@ -84,6 +84,8 @@ impl Subscription {
                     .map(|authors| authors.iter().map(|s| s.to_string()).collect()),
                 kinds: f.kinds().map(|kinds| kinds.iter().collect()),
                 search: f.search().map(|s| s.to_string()),
+                since: None,
+                until: None,
                 tags: f
                     .tags()
                     .map(|tags| {
@@ -208,6 +210,8 @@ mod tests {
             authors,
             kinds,
             search: None,
+            since: None,
+            until: None,
             tags,
         }
     }

@@ -327,6 +327,7 @@ async fn handle_post_event(
 async fn handle_info(settings: Arc<Settings>) -> Result<impl Reply, Rejection> {
     Ok(warp::reply::json(&serde_json::json!({
         "vapid_public_key": settings.vapid_public_key,
+        "supports_timed_filters": true,
     })))
 }
 
