@@ -1580,13 +1580,16 @@ async fn test_push_rate_limit_allows_burst_and_throttles_push_targets(
 #[tokio::test]
 async fn server_exits_when_http_port_is_unavailable() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let db_path = std::env::temp_dir().join(format!("nns-bind-failure-{}", uuid::Uuid::new_v4()));
+    let test_dir = std::env::temp_dir().join(format!("nns-bind-failure-{}", uuid::Uuid::new_v4()));
+    fs::create_dir_all(test_dir.join("config")).unwrap();
+    fs::copy("config/default.toml", test_dir.join("config/default.toml")).unwrap();
     let child = tokio::process::Command::new(env!("CARGO_BIN_EXE_nostr-notification-server"))
+        .current_dir(&test_dir)
         .env(
             "NNS_HTTP_PORT",
             listener.local_addr().unwrap().port().to_string(),
         )
-        .env("NNS_DB_PATH", &db_path)
+        .env("NNS_DB_PATH", test_dir.join("db"))
         .env("NNS_DB_MAP_SIZE", "201326592")
         .env("NNS_RELAYS", "")
         .env("NNS_USE_SOCIAL_GRAPH", "false")
@@ -1603,7 +1606,7 @@ async fn server_exits_when_http_port_is_unavailable() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("AddrInUse"), "unexpected error: {stderr}");
-    fs::remove_dir_all(db_path).unwrap();
+    fs::remove_dir_all(test_dir).unwrap();
 }
 
 #[tokio::test]

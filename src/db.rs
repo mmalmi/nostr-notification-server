@@ -635,7 +635,6 @@ impl DbHandler {
                 let data = other_sub.serialize()?;
                 self.subscriptions.put(wtxn, &other_id, &data)?;
                 self.put_subscription_indices(wtxn, &other_sub.subscriber, &other_id, &other_sub)?;
-                self.put_push_target_indices(wtxn, &other_id, &other_sub)?;
                 debug!(
                     "Removed moved push target from subscription {} while saving {}",
                     other_id, current_id
@@ -850,20 +849,22 @@ impl DbHandler {
         Ok(result)
     }
 
-    pub fn has_seen_event(
-        &self,
-        event_id: &str,
-    ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
-        let rtxn = self.env.read_txn()?;
-        Ok(self.seen_events.get(&rtxn, event_id)?.is_some())
-    }
-
-    pub fn mark_event_seen(
+    /// Atomically claim an event so concurrent relay/API arrivals only deliver once.
+    pub fn claim_event(
         &self,
         event_id: &str,
         max_events: usize,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+        {
+            let rtxn = self.env.read_txn()?;
+            if self.seen_events.get(&rtxn, event_id)?.is_some() {
+                return Ok(false);
+            }
+        }
         let mut wtxn = self.env.write_txn()?;
+        if self.seen_events.get(&wtxn, event_id)?.is_some() {
+            return Ok(false);
+        }
 
         let current_count = self.seen_events.len(&wtxn)?;
         if current_count >= max_events as u64 {
@@ -873,7 +874,7 @@ impl DbHandler {
         let seen_at = current_unix_time().to_be_bytes();
         self.seen_events.put(&mut wtxn, event_id, &seen_at)?;
         wtxn.commit()?;
-        Ok(())
+        Ok(true)
     }
 
     fn prune_seen_events(
@@ -1337,6 +1338,39 @@ mod tests {
             until: None,
             tags,
         }
+    }
+
+    #[test]
+    fn concurrent_event_claims_have_one_winner_and_survive_reopening(
+    ) -> Result<(), Box<dyn StdError + Send + Sync>> {
+        let path = std::env::temp_dir().join(format!("event-claim-{}", uuid::Uuid::new_v4()));
+        let settings = test_settings(path.to_string_lossy().into_owned());
+        let db = DbHandler::new(&settings)?;
+        let barrier = std::sync::Barrier::new(8);
+        let claims = std::thread::scope(|scope| {
+            let threads: Vec<_> = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        db.claim_event("same-event", 100).unwrap()
+                    })
+                })
+                .collect();
+            threads
+                .into_iter()
+                .map(|thread| usize::from(thread.join().unwrap()))
+                .sum::<usize>()
+        });
+        assert_eq!(claims, 1);
+        assert_eq!(db.get_seen_events_count()?, 1);
+        drop(db);
+        let db = DbHandler::new(&settings)?;
+        assert!(!db.claim_event("same-event", 100)?);
+        assert!(db.claim_event("different-event", 100)?);
+        assert_eq!(db.get_seen_events_count()?, 2);
+        drop(db);
+        std::fs::remove_dir_all(path)?;
+        Ok(())
     }
 
     #[test]

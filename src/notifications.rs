@@ -351,19 +351,15 @@ pub async fn handle_incoming_event(
     }
 
     let event_id = event.id.to_string();
-    match db_handler.has_seen_event(&event_id) {
-        Ok(true) => {
+    match db_handler.claim_event(&event_id, settings.max_seen_events) {
+        Ok(false) => {
             debug!("Event {} already seen, skipping", event_id);
             return Ok(());
         }
-        Ok(false) => {
-            if let Err(e) = db_handler.mark_event_seen(&event_id, settings.max_seen_events) {
-                error!("Failed to mark event as seen: {}", e);
-            }
-        }
+        Ok(true) => {}
         Err(e) => {
-            error!("Failed to check seen event: {}", e);
-            // Continue processing to avoid missing events due to DB errors
+            error!("Failed to claim event: {}", e);
+            // Continue processing to avoid missing events due to DB errors.
         }
     }
 
