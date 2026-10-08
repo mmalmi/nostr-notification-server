@@ -177,25 +177,24 @@ impl DbHandler {
         &self,
         pubkey: &str,
     ) -> Result<Vec<(String, Subscription)>, Box<dyn std::error::Error + Send + Sync>> {
+        self.get_indexed_subscriptions(&self.subscriptions_by_pubkey_and_id, pubkey)
+    }
+
+    fn get_indexed_subscriptions(
+        &self,
+        index: &Database<Str, Str>,
+        value: &str,
+    ) -> Result<Vec<(String, Subscription)>, Box<dyn StdError + Send + Sync>> {
         let rtxn = self.env.read_txn()?;
-        let prefix = format!("{}:", pubkey);
-
-        let subscriptions: Vec<(String, Subscription)> = self
-            .subscriptions_by_pubkey_and_id
-            .prefix_iter(&rtxn, &prefix)?
-            .filter_map(|result| {
-                result.ok().and_then(|(key, _)| {
-                    // Extract subscription ID from the key (format: "pubkey:id")
-                    let id = key.split(':').nth(1)?;
-                    self.subscriptions
-                        .get(&rtxn, id)
-                        .ok()?
-                        .and_then(|bytes| Subscription::deserialize(bytes).ok())
-                        .map(|sub| (id.to_string(), sub))
-                })
-            })
-            .collect();
-
+        let prefix = format!("{value}:");
+        let mut subscriptions = Vec::new();
+        for entry in index.prefix_iter(&rtxn, &prefix)? {
+            let (key, _) = entry?;
+            let id = &key[prefix.len()..];
+            if let Some(bytes) = self.subscriptions.get(&rtxn, id)? {
+                subscriptions.push((id.to_string(), Subscription::deserialize(bytes)?));
+            }
+        }
         Ok(subscriptions)
     }
 
@@ -290,16 +289,25 @@ impl DbHandler {
         id: &str,
     ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
         let mut wtxn = self.env.write_txn()?;
+        let index_key = format!("{pubkey}:{id}");
+        // Check ownership in the same transaction that removes the record.
+        if self
+            .subscriptions_by_pubkey_and_id
+            .get(&wtxn, &index_key)?
+            .is_none()
+        {
+            return Ok(false);
+        }
         let existing = self
             .subscriptions
             .get(&wtxn, id)?
-            .and_then(|bytes| Subscription::deserialize(bytes).ok());
+            .map(Subscription::deserialize)
+            .transpose()?;
         let existed = self.subscriptions.delete(&mut wtxn, id)?;
 
         if let Some(subscription) = existing.as_ref() {
             self.delete_subscription_indices(&mut wtxn, pubkey, id, subscription)?;
         } else {
-            let index_key = format!("{}:{}", pubkey, id);
             self.subscriptions_by_pubkey_and_id
                 .delete(&mut wtxn, &index_key)?;
         }
@@ -616,7 +624,6 @@ impl DbHandler {
                 &other_id,
                 &original_sub,
             )?;
-            self.delete_push_target_indices(wtxn, &other_id, &original_sub)?;
 
             if other_sub.is_empty() {
                 self.subscriptions.delete(wtxn, &other_id)?;
@@ -789,31 +796,7 @@ impl DbHandler {
         &self,
         p_value: &str,
     ) -> Result<Vec<(String, Subscription)>, Box<dyn std::error::Error + Send + Sync>> {
-        let rtxn = self.env.read_txn()?;
-        let prefix = format!("{}:", p_value);
-
-        let subscriptions: Vec<(String, Subscription)> = self
-            .subscriptions_by_p_tag_and_id
-            .prefix_iter(&rtxn, &prefix)?
-            .filter_map(|result| {
-                result.ok().and_then(|(key, _)| {
-                    // Extract subscription ID from the key (format: "p_tag:id")
-                    let id = key.split(':').nth(1)?;
-                    self.subscriptions
-                        .get(&rtxn, id)
-                        .ok()?
-                        .and_then(|bytes| Subscription::deserialize(bytes).ok())
-                        .map(|sub| (id.to_string(), sub))
-                })
-            })
-            .collect();
-
-        debug!(
-            "Retrieved subscriptions for p tag {}: {:?}",
-            p_value,
-            subscriptions.len()
-        );
-        Ok(subscriptions)
+        self.get_indexed_subscriptions(&self.subscriptions_by_p_tag_and_id, p_value)
     }
 
     pub fn get_stats(&self) -> Result<DbStats, Box<dyn std::error::Error + Send + Sync>> {
@@ -833,31 +816,7 @@ impl DbHandler {
         &self,
         author: &str,
     ) -> Result<Vec<(String, Subscription)>, Box<dyn std::error::Error + Send + Sync>> {
-        let rtxn = self.env.read_txn()?;
-        let prefix = format!("{}:", author);
-
-        let subscriptions: Vec<(String, Subscription)> = self
-            .subscriptions_by_author_and_id
-            .prefix_iter(&rtxn, &prefix)?
-            .filter_map(|result| {
-                result.ok().and_then(|(key, _)| {
-                    // Extract subscription ID from the key (format: "author:id")
-                    let id = key.split(':').nth(1)?;
-                    self.subscriptions
-                        .get(&rtxn, id)
-                        .ok()?
-                        .and_then(|bytes| Subscription::deserialize(bytes).ok())
-                        .map(|sub| (id.to_string(), sub))
-                })
-            })
-            .collect();
-
-        debug!(
-            "Retrieved subscriptions for author {}: {:?}",
-            author,
-            subscriptions.len()
-        );
-        Ok(subscriptions)
+        self.get_indexed_subscriptions(&self.subscriptions_by_author_and_id, author)
     }
 
     pub fn save_last_event_time(
@@ -1378,6 +1337,71 @@ mod tests {
             until: None,
             tags,
         }
+    }
+
+    #[test]
+    fn subscription_delete_requires_owner_and_cleans_all_indices(
+    ) -> Result<(), Box<dyn StdError + Send + Sync>> {
+        let path =
+            std::env::temp_dir().join(format!("subscription-owner-{}", uuid::Uuid::new_v4()));
+        let db = DbHandler::new(&test_settings(path.to_string_lossy().into_owned()))?;
+        let subscription: Subscription = serde_json::from_value(serde_json::json!({
+            "subscriber": "alice", "filter": {"authors": ["author"], "#p": ["recipient"]},
+            "fcm_tokens": ["token"]
+        }))?;
+        db.save_subscription("alice", "messages", &subscription)?;
+        assert!(!db.delete_subscription("bob", "messages")?);
+        assert!(db.get_subscription("alice", "messages")?.is_some());
+        assert_eq!(db.get_subscriptions_for_pubkey("alice")?.len(), 1);
+        assert_eq!(db.get_subscriptions_by_author("author")?.len(), 1);
+        assert_eq!(db.get_subscriptions_by_p_tag("recipient")?.len(), 1);
+        assert!(db.delete_subscription("alice", "messages")?);
+        assert!(!db.delete_subscription("alice", "messages")?);
+        assert!(db.get_subscription("alice", "messages")?.is_none());
+        assert!(db.get_subscriptions_for_pubkey("alice")?.is_empty());
+        assert!(db.get_subscriptions_by_author("author")?.is_empty());
+        assert!(db.get_subscriptions_by_p_tag("recipient")?.is_empty());
+        let rtxn = db.env.read_txn()?;
+        assert_eq!(db.subscriptions_by_fcm_token_and_id.len(&rtxn)?, 0);
+        drop(rtxn);
+        drop(db);
+        std::fs::remove_dir_all(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn indexed_lookup_preserves_full_ids_and_reports_corrupt_records(
+    ) -> Result<(), Box<dyn StdError + Send + Sync>> {
+        let path =
+            std::env::temp_dir().join(format!("subscription-index-{}", uuid::Uuid::new_v4()));
+        let db = DbHandler::new(&test_settings(path.to_string_lossy().into_owned()))?;
+        let subscription: Subscription = serde_json::from_value(serde_json::json!({
+            "subscriber": "alice", "filter": {"authors": ["author"], "#p": ["recipient"]},
+            "fcm_tokens": ["token"]
+        }))?;
+        db.save_subscription("alice", "messages:device", &subscription)?;
+        assert_eq!(
+            db.get_subscriptions_for_pubkey("alice")?[0].0,
+            "messages:device"
+        );
+        assert_eq!(
+            db.get_subscriptions_by_author("author")?[0].0,
+            "messages:device"
+        );
+        assert_eq!(
+            db.get_subscriptions_by_p_tag("recipient")?[0].0,
+            "messages:device"
+        );
+        let mut wtxn = db.env.write_txn()?;
+        db.subscriptions
+            .put(&mut wtxn, "messages:device", b"invalid")?;
+        wtxn.commit()?;
+        assert!(db.get_subscriptions_for_pubkey("alice").is_err());
+        assert!(db.get_subscriptions_by_author("author").is_err());
+        assert!(db.get_subscriptions_by_p_tag("recipient").is_err());
+        drop(db);
+        std::fs::remove_dir_all(path)?;
+        Ok(())
     }
 
     #[test]

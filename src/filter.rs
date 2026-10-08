@@ -62,22 +62,11 @@ impl SubscriptionFilter {
 
         for (tag_name, tag_values) in &self.tags {
             if let Some(tag_name) = tag_name.strip_prefix('#') {
-                let event_tag_values: Vec<_> = event
-                    .tags
-                    .iter()
-                    .filter(|tag| {
-                        tag.as_slice()
-                            .first()
-                            .map(|t| t == tag_name)
-                            .unwrap_or(false)
-                    })
-                    .filter_map(|tag| tag.as_slice().get(1).cloned())
-                    .collect();
-
-                if !tag_values
-                    .iter()
-                    .any(|value| event_tag_values.contains(value))
-                {
+                if !event.tags.iter().any(|tag| {
+                    let parts = tag.as_slice();
+                    parts.first().is_some_and(|name| name == tag_name)
+                        && parts.get(1).is_some_and(|value| tag_values.contains(value))
+                }) {
                     return false;
                 }
             }

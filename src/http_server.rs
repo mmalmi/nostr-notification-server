@@ -1,5 +1,6 @@
 use log::{debug, error, info};
 use nostr_sdk::Event;
+use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -201,10 +202,7 @@ async fn handle_get_subscriptions(
 ) -> Result<impl warp::Reply, warp::Rejection> {
     match db.get_subscriptions_for_pubkey(&auth_pubkey) {
         Ok(subscriptions) => {
-            let response: serde_json::Map<String, serde_json::Value> = subscriptions
-                .into_iter()
-                .map(|(id, sub)| (id, serde_json::to_value(sub).unwrap()))
-                .collect();
+            let response: BTreeMap<_, _> = subscriptions.into_iter().collect();
             Ok(warp::reply::json(&response))
         }
         Err(e) => {

@@ -154,6 +154,46 @@ async fn test_subscription_endpoints(client: &Client, push_port: u16, webhook_po
     );
 }
 
+async fn test_subscription_delete_requires_owner(client: &Client) {
+    let owner = nostr_sdk::Keys::generate();
+    let other_user = nostr_sdk::Keys::generate();
+    let response = make_authed_request_with_keys(
+        client,
+        Method::POST,
+        "http://127.0.0.1:3030/subscriptions",
+        Some(serde_json::json!({
+            "fcm_tokens": ["ownership-regression-token"],
+            "filter": { "authors": [owner.public_key().to_hex()] }
+        })),
+        &owner,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let created: serde_json::Value = response.json().await.unwrap();
+    let url = format!(
+        "http://127.0.0.1:3030/subscriptions/{}",
+        created["id"].as_str().unwrap()
+    );
+
+    let response =
+        make_authed_request_with_keys(client, Method::DELETE, &url, None, &other_user).await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let response = make_authed_request_with_keys(client, Method::GET, &url, None, &owner).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let subscription: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(subscription["subscriber"], owner.public_key().to_hex());
+    assert_eq!(
+        subscription["fcm_tokens"],
+        serde_json::json!(["ownership-regression-token"])
+    );
+
+    let response = make_authed_request_with_keys(client, Method::DELETE, &url, None, &owner).await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let response = make_authed_request_with_keys(client, Method::GET, &url, None, &owner).await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
 async fn test_author_subscription_endpoints(client: &Client, push_port: u16, webhook_port: u16) {
     let (_subscriber_keys, author_keys) = get_test_keys_pair(1);
     let author_pubkey = author_keys.public_key().to_string();
@@ -1538,6 +1578,35 @@ async fn test_push_rate_limit_allows_burst_and_throttles_push_targets(
 }
 
 #[tokio::test]
+async fn server_exits_when_http_port_is_unavailable() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let db_path = std::env::temp_dir().join(format!("nns-bind-failure-{}", uuid::Uuid::new_v4()));
+    let child = tokio::process::Command::new(env!("CARGO_BIN_EXE_nostr-notification-server"))
+        .env(
+            "NNS_HTTP_PORT",
+            listener.local_addr().unwrap().port().to_string(),
+        )
+        .env("NNS_DB_PATH", &db_path)
+        .env("NNS_DB_MAP_SIZE", "201326592")
+        .env("NNS_RELAYS", "")
+        .env("NNS_USE_SOCIAL_GRAPH", "false")
+        .env("RUST_LOG", "warn")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let output = tokio::time::timeout(Duration::from_secs(10), child.wait_with_output())
+        .await
+        .expect("server must exit instead of running without an HTTP listener")
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("AddrInUse"), "unexpected error: {stderr}");
+    fs::remove_dir_all(db_path).unwrap();
+}
+
+#[tokio::test]
 async fn test_integration() {
     let client = Client::new();
     let (push_port, received_pushes) = start_mock_push_server().await;
@@ -1577,6 +1646,7 @@ async fn test_integration() {
 
     test_info_endpoint(&client).await;
     test_subscription_endpoints(&client, push_port, webhook_port).await;
+    test_subscription_delete_requires_owner(&client).await;
     test_author_subscription_endpoints(&client, push_port, webhook_port).await;
     test_event_endpoint(
         &client,

@@ -72,29 +72,16 @@ pub async fn run_nostr_client(
     relay_pool.wait_for_connection(Duration::from_secs(5)).await;
     info!("Connected to relays");
 
-    // Use last event time if available, otherwise start from now for regular events
-    let since_timestamp = if let Some(last_time) = last_event_time {
-        // Add 1 second to avoid getting the last event again
-        Timestamp::from(last_time + 1)
-    } else {
-        Timestamp::now()
-    };
+    let filters = subscription_filters(last_event_time, Timestamp::now());
+    info!("Subscribing to firehose events: {:?}", filters);
 
-    let two_days_ago = Timestamp::now() - 172800; // 2 days = 172800 seconds
-    let filters = vec![
-        Filter::new().since(since_timestamp), // everything from last event time or now
-        Filter::new().kind(Kind::Custom(1059)).since(two_days_ago), // gift wraps - kind 1059 from past 2 days
-    ];
-
-    info!("Subscribing to firehose events since: {}", since_timestamp);
-
+    // Register before subscribing: relays can replay events while subscribe awaits.
+    let mut notifications = relay_pool.notifications();
     // Subscribe to events
     relay_pool
-        .subscribe(filters, SubscribeOptions::default())
+        .subscribe(filters.clone(), SubscribeOptions::default())
         .await?;
 
-    // Get notification receiver
-    let mut notifications = relay_pool.notifications();
     let mut shutdown_check = tokio::time::interval(Duration::from_secs(SHUTDOWN_CHECK_SECONDS));
     shutdown_check.set_missed_tick_behavior(MissedTickBehavior::Skip);
     shutdown_check.tick().await;
@@ -132,16 +119,13 @@ pub async fn run_nostr_client(
                             }
                         }
 
-                        // Validate event timestamp matches our filter
-                        // For gift wraps, check against two_days_ago; for others, check against since_timestamp
+                        // Gift wraps deliberately use their wider replay window.
+                        let filter = &filters[usize::from(event.kind == Kind::GiftWrap)];
+                        if !filter.match_event(&event, Default::default()) {
+                            debug!("Skipping event outside subscription filter: {}", event.id);
+                            continue;
+                        }
                         if event.kind == Kind::Custom(1059) {
-                            if event.created_at < two_days_ago {
-                                debug!(
-                                    "Skipping gift wrap event older than filter: {} < {}",
-                                    event.created_at, two_days_ago
-                                );
-                                continue;
-                            }
                             // Skip gift wrap events in the first minutes
                             if let Ok(elapsed) = startup_time.elapsed() {
                                 if elapsed < Duration::from_secs(60 * 2) {
@@ -151,15 +135,6 @@ pub async fn run_nostr_client(
                                         continue;
                                     }
                                 }
-                            }
-                        } else {
-                            // For non-gift-wrap events, check against since_timestamp
-                            if event.created_at < since_timestamp {
-                                debug!(
-                                    "Skipping event older than filter: {} < {}",
-                                    event.created_at, since_timestamp
-                                );
-                                continue;
                             }
                         }
 
@@ -207,6 +182,15 @@ pub async fn run_nostr_client(
     Ok(())
 }
 
+fn subscription_filters(last_event_time: Option<u64>, now: Timestamp) -> Vec<Filter> {
+    // Replay the saved second too; event IDs already deduplicate processed events.
+    let since = last_event_time.map(Timestamp::from).unwrap_or(now);
+    vec![
+        Filter::new().since(since),
+        Filter::new().kind(Kind::GiftWrap).since(now - 172_800),
+    ]
+}
+
 fn event_age_secs(event: &Event) -> u64 {
     current_unix_time().saturating_sub(event.created_at.as_secs())
 }
@@ -236,4 +220,42 @@ async fn handle_event(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nostr_sdk::{EventBuilder, Keys};
+
+    fn event_at(kind: Kind, timestamp: u64) -> Event {
+        EventBuilder::new(kind, "notification")
+            .custom_created_at(Timestamp::from(timestamp))
+            .sign_with_keys(&Keys::generate())
+            .unwrap()
+    }
+
+    #[test]
+    fn restart_filter_replays_events_from_the_checkpoint_second() {
+        let checkpoint = 1_700_000_000;
+        let filters = subscription_filters(Some(checkpoint), Timestamp::from(checkpoint + 60));
+        assert!(filters[0].match_event(&event_at(Kind::TextNote, checkpoint), Default::default()));
+        assert!(!filters[0].match_event(
+            &event_at(Kind::TextNote, checkpoint - 1),
+            Default::default()
+        ));
+    }
+
+    #[test]
+    fn fresh_start_keeps_the_gift_wrap_replay_window() {
+        let now = 1_700_000_000;
+        let filters = subscription_filters(None, Timestamp::from(now));
+        assert!(filters[0].match_event(&event_at(Kind::TextNote, now), Default::default()));
+        assert!(!filters[0].match_event(&event_at(Kind::TextNote, now - 1), Default::default()));
+        assert!(
+            filters[1].match_event(&event_at(Kind::GiftWrap, now - 172_800), Default::default())
+        );
+        assert!(
+            !filters[1].match_event(&event_at(Kind::GiftWrap, now - 172_801), Default::default())
+        );
+    }
 }

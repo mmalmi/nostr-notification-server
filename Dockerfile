@@ -10,7 +10,8 @@ WORKDIR /usr/src/app
 COPY . .
 
 # Then build
-RUN cargo build --release
+ARG CARGO_BUILD_JOBS
+RUN cargo build --release --locked
 
 # Runtime stage
 FROM debian:bookworm-slim

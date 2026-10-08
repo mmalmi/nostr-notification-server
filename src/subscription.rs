@@ -74,7 +74,9 @@ impl Subscription {
             .unwrap_or_default();
 
         let filter = {
-            let f = fbs.filter().expect("Filter should always be present");
+            let f = fbs
+                .filter()
+                .ok_or("Legacy subscription is missing its filter")?;
             SubscriptionFilter {
                 ids: f
                     .ids()
@@ -214,6 +216,47 @@ mod tests {
             until: None,
             tags,
         }
+    }
+
+    #[test]
+    fn legacy_subscription_without_filter_returns_error() {
+        use crate::schema::subscription_generated::subscription as legacy;
+
+        let mut builder = flatbuffers::FlatBufferBuilder::new();
+        let subscription =
+            legacy::Subscription::create(&mut builder, &legacy::SubscriptionArgs::default());
+        builder.finish(subscription, None);
+
+        let error = Subscription::deserialize(builder.finished_data()).unwrap_err();
+        assert!(error.to_string().contains("filter"));
+    }
+
+    #[test]
+    fn legacy_subscription_with_filter_remains_readable() {
+        use crate::schema::subscription_generated::subscription as legacy;
+
+        let mut builder = flatbuffers::FlatBufferBuilder::new();
+        let kinds = builder.create_vector(&[1u16, 4]);
+        let filter = legacy::SubscriptionFilter::create(
+            &mut builder,
+            &legacy::SubscriptionFilterArgs {
+                kinds: Some(kinds),
+                ..Default::default()
+            },
+        );
+        let subscription = legacy::Subscription::create(
+            &mut builder,
+            &legacy::SubscriptionArgs {
+                filter: Some(filter),
+                ..Default::default()
+            },
+        );
+        builder.finish(subscription, None);
+
+        let restored = Subscription::deserialize(builder.finished_data()).unwrap();
+        assert_eq!(restored.filter.kinds, Some(vec![1, 4]));
+        assert!(restored.background_authors.is_empty());
+        assert!(restored.filters.is_empty());
     }
 
     #[test]

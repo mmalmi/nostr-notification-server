@@ -153,11 +153,7 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     debug!("Spawning HTTP server");
     let server = tokio::spawn(async move {
         debug!("HTTP server task started");
-        if let Err(e) =
-            http_server::run_http_server(db_handler_clone, settings_clone, shutdown_flag_http).await
-        {
-            error!("HTTP server error: {}", e);
-        }
+        http_server::run_http_server(db_handler_clone, settings_clone, shutdown_flag_http).await
     });
 
     tokio::spawn(async move {
@@ -167,7 +163,10 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     });
 
     debug!("Waiting for tasks to complete");
-    tokio::try_join!(nostr_client, server)?;
+    tokio::try_join!(
+        async { Ok::<_, Box<dyn std::error::Error + Send + Sync>>(nostr_client.await?) },
+        async { server.await? },
+    )?;
 
     debug!("Main function ending");
     Ok(())

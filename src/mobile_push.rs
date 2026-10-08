@@ -453,21 +453,34 @@ fn load_secret_value(raw: Option<&str>) -> Result<Option<String>, Box<dyn Error 
 }
 
 fn should_remove_fcm_token(status: StatusCode, body: &str) -> bool {
-    if matches!(status, StatusCode::NOT_FOUND | StatusCode::GONE) {
-        return true;
+    let Ok(response) = serde_json::from_str::<serde_json::Value>(body) else {
+        return false;
+    };
+    let error = &response["error"];
+    if status == StatusCode::NOT_FOUND {
+        return error["details"].as_array().is_some_and(|details| {
+            details.iter().any(|detail| {
+                detail["@type"] == "type.googleapis.com/google.firebase.fcm.v1.FcmError"
+                    && detail["errorCode"] == "UNREGISTERED"
+            })
+        });
     }
-    let normalized = body.to_ascii_lowercase();
-    normalized.contains("unregistered")
-        || normalized.contains("invalid registration token")
-        || normalized.contains("not a valid fcm registration token")
+    // INVALID_ARGUMENT also covers payload errors, so require a token-specific message.
+    status == StatusCode::BAD_REQUEST
+        && error["message"].as_str().is_some_and(|message| {
+            let normalized = message.to_ascii_lowercase();
+            normalized.contains("invalid registration token")
+                || normalized.contains("not a valid fcm registration token")
+        })
 }
 
 fn should_remove_apns_token(status: StatusCode, body: &str) -> bool {
-    if matches!(status, StatusCode::NOT_FOUND | StatusCode::GONE) {
+    if status == StatusCode::GONE {
         return true;
     }
-    let normalized = body.to_ascii_lowercase();
-    normalized.contains("baddevicetoken") || normalized.contains("unregistered")
+    status == StatusCode::BAD_REQUEST
+        && serde_json::from_str::<serde_json::Value>(body)
+            .is_ok_and(|response| response["reason"] == "BadDeviceToken")
 }
 
 fn trimmed_non_empty(value: Option<&str>) -> Option<&str> {
@@ -495,14 +508,83 @@ fn abbreviate_token(token: &str) -> String {
 mod tests {
     use super::{
         build_apns_request_body, compact_event_payload_for_apns, fcm_event_payload_json,
-        resolve_apns_api_base_url_values, resolve_apns_credentials,
+        resolve_apns_api_base_url_values, resolve_apns_credentials, should_remove_apns_token,
+        should_remove_fcm_token,
     };
     use crate::config::ApnsCredential;
     use crate::notifications::{EventDetails, EventPayload, NotificationPayload};
     use nostr_sdk::nostr::{Event, EventBuilder, Keys, Kind, Tag};
     use nostr_sdk::JsonUtil;
+    use reqwest::StatusCode;
     use serde_json::json;
     use std::collections::HashMap;
+
+    #[test]
+    fn fcm_cleanup_requires_a_token_error() {
+        let unregistered = json!({"error": {
+            "status": "NOT_FOUND",
+            "details": [{
+                "@type": "type.googleapis.com/google.firebase.fcm.v1.FcmError",
+                "errorCode": "UNREGISTERED"
+            }]
+        }});
+        assert!(should_remove_fcm_token(
+            StatusCode::NOT_FOUND,
+            &unregistered.to_string()
+        ));
+        assert!(should_remove_fcm_token(
+            StatusCode::BAD_REQUEST,
+            r#"{"error":{"status":"INVALID_ARGUMENT","message":"The registration token is not a valid FCM registration token"}}"#,
+        ));
+        for (status, body) in [
+            (
+                StatusCode::NOT_FOUND,
+                r#"{"error":{"status":"NOT_FOUND","message":"Project not found"}}"#,
+            ),
+            (StatusCode::NOT_FOUND, "<html>Not found</html>"),
+            (StatusCode::GONE, "Gateway removed"),
+            (
+                StatusCode::BAD_REQUEST,
+                r#"{"error":{"status":"INVALID_ARGUMENT","message":"Invalid data payload"}}"#,
+            ),
+            (
+                StatusCode::FORBIDDEN,
+                r#"{"error":{"message":"Project is unregistered"}}"#,
+            ),
+        ] {
+            assert!(!should_remove_fcm_token(status, body), "{status}: {body}");
+        }
+    }
+
+    #[test]
+    fn apns_cleanup_preserves_tokens_on_bad_path_and_provider_errors() {
+        assert!(should_remove_apns_token(
+            StatusCode::GONE,
+            r#"{"reason":"Unregistered"}"#
+        ));
+        assert!(should_remove_apns_token(
+            StatusCode::GONE,
+            r#"{"reason":"ExpiredToken"}"#
+        ));
+        assert!(should_remove_apns_token(
+            StatusCode::BAD_REQUEST,
+            r#"{"reason":"BadDeviceToken"}"#
+        ));
+        for (status, body) in [
+            (StatusCode::NOT_FOUND, r#"{"reason":"BadPath"}"#),
+            (StatusCode::BAD_REQUEST, r#"{"reason":"PayloadTooLarge"}"#),
+            (
+                StatusCode::FORBIDDEN,
+                r#"{"reason":"InvalidProviderToken"}"#,
+            ),
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Unregistered upstream service",
+            ),
+        ] {
+            assert!(!should_remove_apns_token(status, body), "{status}: {body}");
+        }
+    }
 
     #[test]
     fn own_device_push_has_no_alert_sound_or_badge() {

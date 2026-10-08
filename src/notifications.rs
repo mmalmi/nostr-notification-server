@@ -59,7 +59,7 @@ pub async fn create_notification_payload(
     db_handler: &Arc<DbHandler>,
 ) -> NotificationPayload {
     let pubkey = extract_pubkey(event);
-    let event_type = get_event_type(event, db_handler, &pubkey);
+    let event_type = get_event_type(event);
     let author_name = db_handler
         .profiles
         .get_name(&pubkey)
@@ -149,26 +149,19 @@ fn subscription_allows_event(
     Ok(is_visible)
 }
 
-fn get_event_type(event: &Event, db_handler: &Arc<DbHandler>, pubkey: &str) -> String {
+fn get_event_type(event: &Event) -> String {
     match event.kind {
         Kind::TextNote => "Mention".to_string(),
         Kind::EncryptedDirectMessage | Kind::GiftWrap => "DM".to_string(),
         Kind::Repost => "Repost".to_string(),
-        Kind::ZapReceipt => create_zap_message(event, db_handler, pubkey),
+        Kind::ZapReceipt => create_zap_message(event),
         Kind::Reaction => create_reaction_message(&event.content),
         _ if event.kind.as_u16() == 1060 => "DM".to_string(),
         _ => "Notification".to_string(),
     }
 }
 
-fn create_zap_message(event: &Event, db_handler: &Arc<DbHandler>, pubkey: &str) -> String {
-    let sender_name = db_handler
-        .profiles
-        .get_name(pubkey)
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| "Someone".to_string());
-
+fn create_zap_message(event: &Event) -> String {
     let amount = event.tags.iter().find_map(|tag| {
         if let Some(TagStandard::Amount { millisats, .. }) = tag.as_standardized() {
             Some(millisats)
@@ -180,18 +173,14 @@ fn create_zap_message(event: &Event, db_handler: &Arc<DbHandler>, pubkey: &str) 
     match amount {
         Some(millisats) => {
             if *millisats < 1000 {
-                format!(
-                    "{} zapped {:.3} sats",
-                    sender_name,
-                    *millisats as f64 / 1000.0
-                )
+                format!("zapped {:.3} sats", *millisats as f64 / 1000.0)
             } else {
-                format!("{} zapped {} sats", sender_name, millisats / 1000)
+                format!("zapped {} sats", millisats / 1000)
             }
         }
         None => {
             debug!("Failed to extract zap amount from event: {}", event.id);
-            format!("{} sent a zap", sender_name)
+            "sent a zap".to_string()
         }
     }
 }
@@ -304,7 +293,12 @@ async fn send_webhook(
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let client = reqwest::Client::new();
 
-    client.post(webhook_url).json(&payload).send().await?;
+    client
+        .post(webhook_url)
+        .json(payload)
+        .send()
+        .await?
+        .error_for_status()?;
     Ok(())
 }
 
@@ -446,7 +440,7 @@ fn unique_p_tag_values(event: &Event) -> Vec<String> {
         .iter()
         .filter_map(extract_p_tag_value)
         .filter_map(|p_value| {
-            if seen_p_tags.insert(p_value.clone()) {
+            if seen_p_tags.insert(p_value) {
                 Some(p_value.clone())
             } else {
                 debug!(
@@ -606,8 +600,7 @@ pub async fn send_notifications(
         }));
     }
 
-    for push_sub in subscription.web_push_subscriptions.clone() {
-        let mut push_sub = push_sub.clone();
+    for mut push_sub in subscription.web_push_subscriptions.clone() {
         push_sub.endpoint = push_sub.endpoint.trim().to_string();
         if push_sub.endpoint.is_empty() {
             continue;
@@ -850,6 +843,56 @@ mod tests {
             until: None,
             tags,
         }
+    }
+
+    #[test]
+    fn zap_titles_include_the_sender_once() {
+        for (amount, expected) in [
+            (None, "Alice sent a zap"),
+            (Some("100"), "Alice zapped 0.100 sats"),
+            (Some("1000"), "Alice zapped 1 sats"),
+        ] {
+            let tags = amount.map(|value| Tag::parse(["amount", value]).unwrap());
+            let event = EventBuilder::new(Kind::ZapReceipt, "")
+                .tags(tags)
+                .sign_with_keys(&Keys::generate())
+                .unwrap();
+            assert_eq!(
+                create_title(&get_event_type(&event), "Alice", event.kind),
+                expected
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn webhook_rejects_unsuccessful_http_responses(
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let route = warp::post().and(warp::path::param::<u16>()).map(|status| {
+            warp::reply::with_status("", warp::http::StatusCode::from_u16(status).unwrap())
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let endpoint = format!("http://{}", listener.local_addr()?);
+        let server = tokio::spawn(warp::serve(route).incoming(listener).run());
+        let event = EventBuilder::new(Kind::TextNote, "hello").sign_with_keys(&Keys::generate())?;
+        let payload = NotificationPayload {
+            event: create_event_payload(&event),
+            title: String::new(),
+            body: String::new(),
+            icon: String::new(),
+            url: String::new(),
+        };
+        let mut results = Vec::new();
+        for status in [204, 400, 500] {
+            results.push(
+                send_webhook(&format!("{endpoint}/{status}"), &payload)
+                    .await
+                    .is_ok(),
+            );
+        }
+        server.abort();
+        let _ = server.await;
+        assert_eq!(results, [true, false, false]);
+        Ok(())
     }
 
     async fn invalid_apns_cleanup_after_update(
