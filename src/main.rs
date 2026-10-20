@@ -1,4 +1,5 @@
 pub mod auth;
+mod call_dispatch;
 mod config;
 mod db;
 pub mod errors;

@@ -1,3 +1,4 @@
+use crate::call_dispatch::{CallDispatch, Disposition};
 use crate::config::Settings;
 use crate::db::DbHandler;
 use crate::mobile_push::{send_apns_push, send_fcm_push};
@@ -119,10 +120,12 @@ fn subscription_allows_event(
 ) -> Result<bool, Box<dyn Error + Send + Sync>> {
     let sender_pubkey = extract_pubkey(event);
     if db_handler.recipient_has_muted_author(&subscription.subscriber, &sender_pubkey)? {
-        debug!(
-            "Skipping notification for subscription {} because subscriber muted {}",
-            subscription.subscriber, sender_pubkey
-        );
+        if event.kind.as_u16() != 21_111 {
+            debug!(
+                "Skipping notification for subscription {} because subscriber muted {}",
+                subscription.subscriber, sender_pubkey
+            );
+        }
         return Ok(false);
     }
 
@@ -141,10 +144,12 @@ fn subscription_allows_event(
     let is_visible =
         db_handler.is_notification_author_visible(&subscription.subscriber, &sender_pubkey)?;
     if !is_visible {
-        debug!(
-            "Skipping notification for subscription {} because {} is unknown or overmuted",
-            subscription.subscriber, sender_pubkey
-        );
+        if event.kind.as_u16() != 21_111 {
+            debug!(
+                "Skipping notification for subscription {} because {} is unknown or overmuted",
+                subscription.subscriber, sender_pubkey
+            );
+        }
     }
     Ok(is_visible)
 }
@@ -308,11 +313,14 @@ pub async fn handle_incoming_event(
     settings: &Settings,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let start = Instant::now();
-    if event.kind.as_u16() == 21_111 {
+    let call = CallDispatch::for_event(event);
+    call.record(Disposition::Received);
+    if call.is_call() {
         let now = current_unix_timestamp();
         if event.created_at.as_secs() > now.saturating_add(5)
             || now.saturating_sub(event.created_at.as_secs()) > 40
         {
+            call.record(Disposition::Stale);
             return Ok(());
         }
     }
@@ -320,14 +328,24 @@ pub async fn handle_incoming_event(
         || (event.kind == Kind::ContactList && settings.use_social_graph)
         || event.kind.as_u16() == 10_000;
 
-    let notification_jobs = collect_notification_jobs(event, &db_handler, settings)?;
+    let notification_jobs =
+        collect_notification_jobs(event, &db_handler, settings).map_err(|error| {
+            call.record(Disposition::MatchFailed);
+            error
+        })?;
+    call.record(Disposition::Matched {
+        matches: notification_jobs.len(),
+    });
     if notification_jobs.is_empty() && !updates_local_state {
         debug!("Total event processing took: {:?}", start.elapsed());
         return Ok(());
     }
 
     if let Err(e) = event.verify() {
-        debug!("Event signature verification failed: {:?}", e);
+        call.record(Disposition::SignatureRejected);
+        if !call.is_call() {
+            debug!("Event signature verification failed: {:?}", e);
+        }
         return Ok(());
     }
 
@@ -339,11 +357,13 @@ pub async fn handle_incoming_event(
         db_handler.handle_mute_list_event(event)?;
     }
 
-    debug!(
-        "Processing event with kind: {} and content: {}",
-        event.kind,
-        &event.content.chars().take(50).collect::<String>()
-    );
+    if !call.is_call() {
+        debug!(
+            "Processing event with kind: {} and content: {}",
+            event.kind,
+            &event.content.chars().take(50).collect::<String>()
+        );
+    }
 
     if notification_jobs.is_empty() {
         debug!("Total event processing took: {:?}", start.elapsed());
@@ -353,12 +373,18 @@ pub async fn handle_incoming_event(
     let event_id = event.id.to_string();
     match db_handler.claim_event(&event_id, settings.max_seen_events) {
         Ok(false) => {
-            debug!("Event {} already seen, skipping", event_id);
+            call.record(Disposition::Duplicate);
+            if !call.is_call() {
+                debug!("Event {} already seen, skipping", event_id);
+            }
             return Ok(());
         }
         Ok(true) => {}
         Err(e) => {
-            error!("Failed to claim event: {}", e);
+            call.record(Disposition::ClaimFailed);
+            if !call.is_call() {
+                error!("Failed to claim event: {}", e);
+            }
             // Continue processing to avoid missing events due to DB errors.
         }
     }
@@ -368,6 +394,7 @@ pub async fn handle_incoming_event(
         let settings_clone = settings.clone();
         let db_handler_clone = db_handler.clone();
         let subscription_id = job.subscription_id;
+        let call = call.clone();
 
         tokio::spawn(async move {
             if let Err(e) = send_notifications(
@@ -379,7 +406,11 @@ pub async fn handle_incoming_event(
             )
             .await
             {
-                error!("Failed to send notification: {}", e);
+                if call.is_call() {
+                    call.record(Disposition::DeliveryFailed);
+                } else {
+                    error!("Failed to send notification: {}", e);
+                }
             }
         });
     }
@@ -406,12 +437,14 @@ fn collect_notification_jobs(
     let p_tag_values = unique_p_tag_values(event);
 
     if settings.max_p_tags > 0 && p_tag_values.len() > settings.max_p_tags {
-        debug!(
-            "Skipping p-tag notifications for event {} with {} p tags (max: {})",
-            event.id,
-            p_tag_values.len(),
-            settings.max_p_tags
-        );
+        if event.kind.as_u16() != 21_111 {
+            debug!(
+                "Skipping p-tag notifications for event {} with {} p tags (max: {})",
+                event.id,
+                p_tag_values.len(),
+                settings.max_p_tags
+            );
+        }
     } else {
         for p_value in p_tag_values {
             let tag_start = Instant::now();
@@ -439,10 +472,12 @@ fn unique_p_tag_values(event: &Event) -> Vec<String> {
             if seen_p_tags.insert(p_value) {
                 Some(p_value.clone())
             } else {
-                debug!(
-                    "Skipping duplicate p_tag {} for event {}",
-                    p_value, event.id
-                );
+                if event.kind.as_u16() != 21_111 {
+                    debug!(
+                        "Skipping duplicate p_tag {} for event {}",
+                        p_value, event.id
+                    );
+                }
                 None
             }
         })
@@ -517,22 +552,30 @@ fn collect_p_tag_notification_jobs(
     seen_subscription_ids: &mut HashSet<String>,
     jobs: &mut Vec<NotificationJob>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    debug!("Processing p_tag: {} for event: {}", p_value, event.id);
+    if event.kind.as_u16() != 21_111 {
+        debug!("Processing p_tag: {} for event: {}", p_value, event.id);
+    }
 
     let subscriptions = db_handler.get_subscriptions_by_p_tag(p_value)?;
     if subscriptions.is_empty() {
-        debug!("No subscriptions found for p_tag: {}", p_value);
+        if event.kind.as_u16() != 21_111 {
+            debug!("No subscriptions found for p_tag: {}", p_value);
+        }
         return Ok(());
     }
 
-    debug!(
-        "Found {} subscriptions for p_tag: {}",
-        subscriptions.len(),
-        p_value
-    );
+    if event.kind.as_u16() != 21_111 {
+        debug!(
+            "Found {} subscriptions for p_tag: {}",
+            subscriptions.len(),
+            p_value
+        );
+    }
 
     for (subscription_id, subscription) in subscriptions {
-        debug!("Processing subscription for {}", subscription.subscriber);
+        if event.kind.as_u16() != 21_111 {
+            debug!("Processing subscription for {}", subscription.subscriber);
+        }
         if subscription.matches_event(event)
             && subscription_allows_event(&subscription, event, db_handler)?
         {
@@ -556,10 +599,12 @@ fn push_notification_job(
     event: &Event,
 ) {
     if !seen_subscription_ids.insert(subscription_id.clone()) {
-        debug!(
-            "Skipping duplicate subscription {} for event {}",
-            subscription_id, event.id
-        );
+        if event.kind.as_u16() != 21_111 {
+            debug!(
+                "Skipping duplicate subscription {} for event {}",
+                subscription_id, event.id
+            );
+        }
         return;
     }
 
@@ -577,6 +622,7 @@ pub async fn send_notifications(
     db_handler: Arc<DbHandler>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let background = subscription.is_background_event(&event);
+    let call = CallDispatch::for_event(&event);
     let mut tasks = Vec::new();
     let payload = create_notification_payload(&event, &settings, &db_handler).await;
     let now = current_unix_timestamp();
@@ -604,7 +650,9 @@ pub async fn send_notifications(
 
         let target_key = format!("web_push:{}", push_sub.endpoint);
         if !queued_targets.insert(target_key.clone()) {
-            debug!("Skipping duplicate web push target: {}", push_sub.endpoint);
+            if event.kind.as_u16() != 21_111 {
+                debug!("Skipping duplicate web push target: {}", push_sub.endpoint);
+            }
             continue;
         }
 
@@ -614,10 +662,12 @@ pub async fn send_notifications(
             settings.push_rate_limit_burst,
             settings.push_rate_limit_refill_seconds,
         )? {
-            debug!(
-                "Skipping web push target due to rate limit: {}",
-                push_sub.endpoint
-            );
+            if event.kind.as_u16() != 21_111 {
+                debug!(
+                    "Skipping web push target due to rate limit: {}",
+                    push_sub.endpoint
+                );
+            }
             continue;
         }
 
@@ -661,10 +711,12 @@ pub async fn send_notifications(
             settings.push_rate_limit_burst,
             settings.push_rate_limit_refill_seconds,
         )? {
+            call.record(Disposition::FcmRateLimited);
             debug!("Skipping FCM target due to rate limit");
             continue;
         }
 
+        call.record(Disposition::FcmQueued);
         let payload = payload.clone();
         let settings = settings.clone();
         tasks.push(tokio::spawn(async move {
@@ -742,10 +794,14 @@ pub async fn send_notifications(
                 }
             }
             Err(error) => {
-                error!(
-                    "Notification delivery task failed: {}",
-                    describe_error_chain(error.as_ref())
-                );
+                if call.is_call() {
+                    call.record(Disposition::DeliveryFailed);
+                } else {
+                    error!(
+                        "Notification delivery task failed: {}",
+                        describe_error_chain(error.as_ref())
+                    );
+                }
             }
         }
     }
@@ -839,6 +895,89 @@ mod tests {
             until: None,
             tags,
         }
+    }
+
+    #[tokio::test]
+    async fn call_dispatch_distinguishes_matching_dedup_and_rate_limit(
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        use crate::call_dispatch::tests::{records, start_capture};
+
+        start_capture();
+        let path = std::env::temp_dir().join(format!("call-dispatch-{}", uuid::Uuid::new_v4()));
+        let mut settings = test_settings(path.to_string_lossy().into_owned());
+        settings.push_rate_limit_burst = 1;
+        settings.push_rate_limit_refill_seconds = 60;
+        let db = Arc::new(DbHandler::new(&settings)?);
+        let recipient = Keys::generate().public_key();
+        let sender = Keys::generate();
+        let make_event = |content: &str| {
+            EventBuilder::new(Kind::from(21_111), content)
+                .tags([Tag::public_key(recipient)])
+                .sign_with_keys(&sender)
+        };
+        let event = make_event("opaque-call-one")?;
+        let call = CallDispatch::for_event(&event);
+        handle_incoming_event(&event, db.clone(), &settings).await?;
+        let subscription = serde_json::from_value::<Subscription>(serde_json::json!({
+            "subscriber": recipient.to_hex(),
+            "filter": {"kinds": [21111], "#p": [recipient.to_hex()]},
+            "fcm_tokens": ["private-test-token"]
+        }))?;
+        db.save_subscription(
+            &recipient.to_hex(),
+            "private-test-subscription",
+            &subscription,
+        )?;
+        handle_incoming_event(&event, db.clone(), &settings).await?;
+        handle_incoming_event(&event, db.clone(), &settings).await?;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !records(&call).iter().any(|record| {
+                record["call_wake_dispatch"]["result"]["disposition"] == "fcm_not_configured"
+            }) {
+                sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await?;
+        let second = make_event("opaque-call-two")?;
+        let second_call = CallDispatch::for_event(&second);
+        handle_incoming_event(&second, db.clone(), &settings).await?;
+
+        let dispositions = |call: &CallDispatch| {
+            records(call)
+                .into_iter()
+                .map(|record| record["call_wake_dispatch"]["result"].clone())
+                .collect::<Vec<_>>()
+        };
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if dispositions(&call)
+                    .contains(&serde_json::json!({"disposition": "fcm_not_configured"}))
+                    && dispositions(&second_call)
+                        .contains(&serde_json::json!({"disposition": "fcm_rate_limited"}))
+                {
+                    break;
+                }
+                sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await?;
+        let first = dispositions(&call);
+        assert!(first.contains(&serde_json::json!({"disposition": "matched", "matches": 0})));
+        assert!(first.contains(&serde_json::json!({"disposition": "matched", "matches": 1})));
+        assert!(first.contains(&serde_json::json!({"disposition": "duplicate"})));
+        assert_eq!(
+            first
+                .iter()
+                .filter(|record| record["disposition"] == "fcm_queued")
+                .count(),
+            1
+        );
+        assert!(
+            !dispositions(&second_call).contains(&serde_json::json!({"disposition": "fcm_queued"}))
+        );
+        drop(db);
+        std::fs::remove_dir_all(path)?;
+        Ok(())
     }
 
     #[test]

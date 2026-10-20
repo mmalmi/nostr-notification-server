@@ -11,6 +11,7 @@ use warp::path::FullPath;
 use warp::{Filter, Rejection, Reply};
 
 use crate::auth::verify_nostr_auth;
+use crate::call_dispatch::{CallDispatch, Disposition};
 use crate::config::Settings;
 use crate::db::DbHandler;
 use crate::errors::{clean_error_message, CustomRejection};
@@ -292,7 +293,10 @@ async fn handle_post_event(
     settings: Arc<Settings>,
     event: Event,
 ) -> Result<impl Reply, Rejection> {
-    debug!("Received event: {:?}", event);
+    let call = CallDispatch::for_event(&event);
+    if !call.is_call() {
+        debug!("Received event: {:?}", event);
+    }
 
     // Measure signature verification time
     let start = std::time::Instant::now();
@@ -302,17 +306,25 @@ async fn handle_post_event(
 
     // Verify event signature
     if let Err(e) = verify_result {
-        debug!("Event signature verification failed: {:?}", e);
+        call.record(Disposition::SignatureRejected);
+        if !call.is_call() {
+            debug!("Event signature verification failed: {:?}", e);
+        }
         return Err(warp::reject::custom(CustomRejection {
             message: "Invalid event signature".to_string(),
             error_type: "ValidationError".to_string(),
         }));
     }
 
+    call.record(Disposition::HttpAdmitted);
     // Spawn a new task to handle the event processing
     tokio::spawn(async move {
         if let Err(e) = handle_incoming_event(&event, db_handler, settings.as_ref()).await {
-            error!("Background event processing failed: {:?}", e);
+            if call.is_call() {
+                call.record(Disposition::DeliveryFailed);
+            } else {
+                error!("Background event processing failed: {:?}", e);
+            }
         }
     });
 

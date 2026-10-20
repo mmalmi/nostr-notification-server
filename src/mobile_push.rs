@@ -11,6 +11,7 @@ use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use crate::call_dispatch::{CallDispatch, Disposition};
 use crate::config::{ApnsCredential, Settings};
 use crate::notifications::{EventDetails, EventPayload, NotificationPayload};
 
@@ -49,40 +50,76 @@ pub async fn send_fcm_push(
     settings: &Settings,
     background: bool,
 ) -> Result<bool, Box<dyn Error + Send + Sync>> {
-    let account = match load_fcm_service_account(settings)? {
+    let call = CallDispatch::for_payload(&payload.event);
+    let account = match load_fcm_service_account(settings).map_err(|error| {
+        call.record(Disposition::FcmCredentialsFailed);
+        error
+    })? {
         Some(account) => account,
-        None => return Ok(false),
+        None => {
+            call.record(Disposition::FcmNotConfigured);
+            return Ok(false);
+        }
     };
 
-    let access_token = fetch_fcm_access_token(&account).await?;
+    let access_token = fetch_fcm_access_token(&account).await.map_err(|error| {
+        call.record(Disposition::FcmAuthFailed);
+        error
+    })?;
     let base_url = settings.fcm_api_base_url.trim_end_matches('/');
     let endpoint = format!(
         "{}/v1/projects/{}/messages:send",
         base_url, account.project_id
     );
-    let event_json = fcm_event_payload_json(&payload.event)?;
+    let event_json = fcm_event_payload_json(&payload.event).map_err(|error| {
+        call.record(Disposition::FcmPayloadFailed);
+        error
+    })?;
     let request_body = build_fcm_request_body(token, payload, background, event_json);
+    post_fcm_request(&endpoint, &access_token, &request_body, token, &call).await
+}
 
-    debug!("Sending FCM push for token {}", abbreviate_token(token));
+async fn post_fcm_request(
+    endpoint: &str,
+    access_token: &str,
+    request_body: &serde_json::Value,
+    token: &str,
+    call: &CallDispatch,
+) -> Result<bool, Box<dyn Error + Send + Sync>> {
+    if !call.is_call() {
+        debug!("Sending FCM push for token {}", abbreviate_token(token));
+    }
     let response = reqwest::Client::new()
         .post(endpoint)
         .bearer_auth(access_token)
-        .json(&request_body)
+        .json(request_body)
         .send()
-        .await?;
+        .await
+        .map_err(|error| {
+            call.record(Disposition::FcmTransportFailed);
+            error
+        })?;
     let status = response.status();
     let body = response.text().await.unwrap_or_default();
 
     if status.is_success() {
+        call.record(Disposition::FcmAccepted {
+            status: status.as_u16(),
+        });
         return Ok(false);
     }
     let should_remove = should_remove_fcm_token(status, &body);
-    warn!(
-        "FCM push failed for token {} with status {}: {}",
-        abbreviate_token(token),
-        status,
-        body
-    );
+    call.record(Disposition::FcmRejected {
+        status: status.as_u16(),
+    });
+    if !call.is_call() {
+        warn!(
+            "FCM push failed for token {} with status {}: {}",
+            abbreviate_token(token),
+            status,
+            body
+        );
+    }
     Ok(should_remove)
 }
 
@@ -132,6 +169,7 @@ pub async fn send_apns_push(
     subscription_environment: Option<&str>,
     background: bool,
 ) -> Result<bool, Box<dyn Error + Send + Sync>> {
+    let call = CallDispatch::for_payload(&payload.event);
     let topic = match trimmed_non_empty(subscription_topic)
         .or_else(|| trimmed_non_empty(settings.apns_topic.as_deref()))
     {
@@ -188,11 +226,13 @@ pub async fn send_apns_push(
         .to_string();
     let client = build_apns_client(&host, parsed_base_url.scheme() == "https")?;
 
-    debug!(
-        "Sending APNS push for token {} with payload_bytes={}",
-        abbreviate_token(token),
-        payload_size
-    );
+    if !call.is_call() {
+        debug!(
+            "Sending APNS push for token {} with payload_bytes={}",
+            abbreviate_token(token),
+            payload_size
+        );
+    }
     let mut request = client
         .post(&endpoint)
         .header("authorization", format!("bearer {}", jwt))
@@ -230,23 +270,27 @@ pub async fn send_apns_push(
     let body = response.text().await.unwrap_or_default();
 
     if status.is_success() {
-        info!(
-            "APNS push sent for token {} with status {} (payload_bytes={})",
-            abbreviate_token(token),
-            status,
-            payload_size
-        );
+        if !call.is_call() {
+            info!(
+                "APNS push sent for token {} with status {} (payload_bytes={})",
+                abbreviate_token(token),
+                status,
+                payload_size
+            );
+        }
         return Ok(false);
     }
 
     let should_remove = should_remove_apns_token(status, &body);
-    warn!(
-        "APNS push failed for token {} with status {} (payload_bytes={}): {}",
-        abbreviate_token(token),
-        status,
-        payload_size,
-        body
-    );
+    if !call.is_call() {
+        warn!(
+            "APNS push failed for token {} with status {} (payload_bytes={}): {}",
+            abbreviate_token(token),
+            status,
+            payload_size,
+            body
+        );
+    }
     Ok(should_remove)
 }
 
@@ -508,8 +552,12 @@ fn abbreviate_token(token: &str) -> String {
 mod tests {
     use super::{
         build_apns_request_body, compact_event_payload_for_apns, fcm_event_payload_json,
-        resolve_apns_api_base_url_values, resolve_apns_credentials, should_remove_apns_token,
-        should_remove_fcm_token,
+        post_fcm_request, resolve_apns_api_base_url_values, resolve_apns_credentials,
+        should_remove_apns_token, should_remove_fcm_token,
+    };
+    use crate::call_dispatch::{
+        tests::{assert_not_logged, records, start_capture},
+        CallDispatch,
     };
     use crate::config::ApnsCredential;
     use crate::notifications::{EventDetails, EventPayload, NotificationPayload};
@@ -518,6 +566,67 @@ mod tests {
     use reqwest::StatusCode;
     use serde_json::json;
     use std::collections::HashMap;
+    use warp::Filter;
+
+    #[tokio::test]
+    async fn call_dispatch_logs_real_fcm_status_without_provider_secrets() {
+        start_capture();
+        let secret = "private-provider-error-token-recipient-ciphertext";
+        let route = warp::post()
+            .and(warp::path::param::<u16>())
+            .map(move |status| {
+                warp::reply::with_status(
+                    warp::reply::json(&json!({"error": {"message": secret}})),
+                    warp::http::StatusCode::from_u16(status).unwrap(),
+                )
+            });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(warp::serve(route).incoming(listener).run());
+        for status in [200, 429, 503] {
+            let event = EventBuilder::new(Kind::from(21_111), format!("{secret}-{status}"))
+                .sign_with_keys(&Keys::generate())
+                .unwrap();
+            let call = CallDispatch::for_event(&event);
+            let result = post_fcm_request(
+                &format!("{endpoint}/{status}"),
+                secret,
+                &json!({"message": {"token": secret}}),
+                secret,
+                &call,
+            )
+            .await
+            .unwrap();
+            assert!(!result, "transient/provider errors must not remove tokens");
+            let captured = records(&call);
+            assert_eq!(captured.len(), 1);
+            assert_eq!(
+                captured[0]["call_wake_dispatch"]["result"],
+                json!({
+                    "disposition": if status == 200 {"fcm_accepted"} else {"fcm_rejected"},
+                    "status": status,
+                })
+            );
+            assert!(!captured[0].to_string().contains(secret));
+            assert!(!captured[0].to_string().contains(&event.id.to_hex()));
+        }
+        server.abort();
+        let _ = server.await;
+        let event = EventBuilder::new(Kind::from(21_111), "transport-failure")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let call = CallDispatch::for_event(&event);
+        assert!(
+            post_fcm_request(&endpoint, secret, &json!({}), secret, &call)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            records(&call)[0]["call_wake_dispatch"]["result"],
+            json!({"disposition": "fcm_transport_failed"})
+        );
+        assert_not_logged(secret);
+    }
 
     #[test]
     fn fcm_cleanup_requires_a_token_error() {

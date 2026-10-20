@@ -9,6 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast::error::RecvError;
 use tokio::time::{timeout, MissedTickBehavior};
 
+use crate::call_dispatch::{CallDispatch, Disposition};
 use crate::config::Settings;
 use crate::db::DbHandler;
 use crate::notifications::handle_incoming_event;
@@ -122,7 +123,12 @@ pub async fn run_nostr_client(
                         // Gift wraps deliberately use their wider replay window.
                         let filter = &filters[usize::from(event.kind == Kind::GiftWrap)];
                         if !filter.match_event(&event, Default::default()) {
-                            debug!("Skipping event outside subscription filter: {}", event.id);
+                            let call = CallDispatch::for_event(&event);
+                            if call.is_call() {
+                                call.record(Disposition::RelayFiltered);
+                            } else {
+                                debug!("Skipping event outside subscription filter: {}", event.id);
+                            }
                             continue;
                         }
                         if event.kind == Kind::Custom(1059) {
@@ -213,10 +219,17 @@ async fn handle_event(
     db_handler: Arc<DbHandler>,
     settings: Arc<Settings>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    debug!("Received event: {:?}", event);
+    let call = CallDispatch::for_event(&event);
+    if !call.is_call() {
+        debug!("Received event: {:?}", event);
+    }
 
     if let Err(e) = handle_incoming_event(&event, db_handler, settings.as_ref()).await {
-        error!("Error handling event: {}", e);
+        if call.is_call() {
+            call.record(Disposition::DeliveryFailed);
+        } else {
+            error!("Error handling event: {}", e);
+        }
     }
 
     Ok(())

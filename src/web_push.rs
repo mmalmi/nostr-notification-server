@@ -1,3 +1,4 @@
+use crate::call_dispatch::CallDispatch;
 use crate::config::Settings;
 use crate::notifications::{EventPayload, NotificationPayload};
 use log::{debug, error, info};
@@ -36,19 +37,22 @@ pub async fn send_web_push(
     payload: &NotificationPayload,
     settings: &Settings,
 ) -> Result<bool, Box<dyn Error + Send + Sync>> {
+    let call = CallDispatch::for_payload(&payload.event);
     let event_id = match &payload.event {
         EventPayload::Full(event) => event.id.to_string(),
         EventPayload::Details(details) => details.id.clone(),
     };
 
-    info!(
-        "Sending web push notification{}",
-        if event_id.is_empty() {
-            String::new()
-        } else {
-            format!(" for event: {}", event_id)
-        }
-    );
+    if !call.is_call() {
+        info!(
+            "Sending web push notification{}",
+            if event_id.is_empty() {
+                String::new()
+            } else {
+                format!(" for event: {}", event_id)
+            }
+        );
+    }
 
     let normalized = subscription.normalized();
 
@@ -67,27 +71,35 @@ pub async fn send_web_push(
 
     debug!("Building VAPID signature");
     let signature = sig_builder.build().map_err(|e| {
-        error!("Failed to build VAPID signature: {}", e);
+        if !call.is_call() {
+            error!("Failed to build VAPID signature: {}", e);
+        }
         e
     })?;
     builder.set_vapid_signature(signature);
 
     debug!("Building final web push message");
     let message = builder.build().map_err(|e| {
-        error!("Failed to build web push message: {}", e);
+        if !call.is_call() {
+            error!("Failed to build web push message: {}", e);
+        }
         e
     })?;
 
-    debug!(
-        "Sending push notification to endpoint: {}",
-        subscription.endpoint
-    );
+    if !call.is_call() {
+        debug!(
+            "Sending push notification to endpoint: {}",
+            subscription.endpoint
+        );
+    }
     let client = IsahcWebPushClient::new()?;
     let result = client.send(message).await;
 
     match result {
         Ok(response) => {
-            debug!("Push notification response: {:?}", response);
+            if !call.is_call() {
+                debug!("Push notification response: {:?}", response);
+            }
             info!("Web push notification sent successfully");
             Ok(false)
         }
@@ -96,7 +108,9 @@ pub async fn send_web_push(
                 e,
                 WebPushError::EndpointNotValid | WebPushError::EndpointNotFound
             );
-            info!("Failed to send push notification: {}", e);
+            if !call.is_call() {
+                info!("Failed to send push notification: {}", e);
+            }
             Ok(should_remove)
         }
     }
