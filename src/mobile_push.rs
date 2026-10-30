@@ -181,8 +181,9 @@ pub async fn send_apns_push(
     if voip != is_call_wakeup(&payload.event) {
         return Ok(false);
     }
+    let credential_topic = topic.strip_suffix(".voip").unwrap_or(topic);
     let (key_id, team_id, auth_key) = match resolve_apns_credentials(
-        topic.strip_suffix(".voip").unwrap_or(topic),
+        credential_topic,
         &settings.apns_credentials,
         settings.apns_topic.as_deref(),
         settings.apns_key_id.as_deref(),
@@ -209,7 +210,11 @@ pub async fn send_apns_push(
         &EncodingKey::from_ec_pem(auth_key_pem.as_bytes())?,
     )?;
 
-    let request_body = build_apns_request_body(payload, background || voip);
+    let request_body = build_apns_request_body(
+        payload,
+        background || voip,
+        settings.apns_credentials.get(credential_topic),
+    );
     let request_body_bytes = serde_json::to_vec(&request_body)?;
     let payload_size = request_body_bytes.len();
 
@@ -294,17 +299,25 @@ pub async fn send_apns_push(
     Ok(should_remove)
 }
 
-fn build_apns_request_body(payload: &NotificationPayload, background: bool) -> serde_json::Value {
+fn build_apns_request_body(
+    payload: &NotificationPayload,
+    background: bool,
+    credential: Option<&ApnsCredential>,
+) -> serde_json::Value {
     if background {
         return json!({
             "aps": { "content-available": 1 },
             "event": compact_event_payload_for_apns(&payload.event),
         });
     }
+    let notification_title = trimmed_non_empty(
+        credential.and_then(|credential| credential.notification_title.as_deref()),
+    )
+    .unwrap_or("Iris Chat");
     json!({
         "aps": {
             "alert": {
-                "title": "Iris Chat",
+                "title": notification_title,
                 "body": payload.body
             },
             "sound": "default",
@@ -707,7 +720,7 @@ mod tests {
             icon: String::new(),
             url: String::new(),
         };
-        let body = build_apns_request_body(&payload, true);
+        let body = build_apns_request_body(&payload, true, None);
         assert_eq!(body["aps"], json!({"content-available": 1}));
         assert!(body.get("title").is_none());
         assert!(body.get("body").is_none());
@@ -715,7 +728,7 @@ mod tests {
             serde_json::from_value::<Event>(body["event"].clone()).unwrap(),
             event
         );
-        let alert = build_apns_request_body(&payload, false);
+        let alert = build_apns_request_body(&payload, false, None);
         assert!(alert["aps"]["alert"].is_object());
         assert_eq!(alert["aps"]["sound"], "default");
     }
@@ -739,7 +752,7 @@ mod tests {
             url: String::new(),
         };
 
-        let body = build_apns_request_body(&payload, false);
+        let body = build_apns_request_body(&payload, false, None);
         let received: Event = serde_json::from_value(body["event"].clone()).unwrap();
         received
             .verify()
@@ -800,7 +813,7 @@ mod tests {
             url: "https://example.com/note".to_string(),
         };
 
-        let request_body = build_apns_request_body(&payload, false);
+        let request_body = build_apns_request_body(&payload, false, None);
 
         assert_eq!(
             request_body["aps"],
@@ -822,6 +835,57 @@ mod tests {
     }
 
     #[test]
+    fn apns_notification_title_is_optional_and_topic_scoped() {
+        let credentials: HashMap<String, ApnsCredential> = serde_json::from_value(json!({
+            "legacy.example": {
+                "key_id": "key", "team_id": "team", "auth_key": "unused"
+            },
+            "market.example": {
+                "key_id": "key", "team_id": "team", "auth_key": "unused",
+                "notification_title": " Iris Market "
+            },
+            "blank.example": {
+                "key_id": "key", "team_id": "team", "auth_key": "unused",
+                "notification_title": "  "
+            },
+            "other.example": {
+                "key_id": "key", "team_id": "team", "auth_key": "unused",
+                "notification_title": "Companion"
+            }
+        }))
+        .expect("existing and extended credential JSON must both deserialize");
+        assert!(credentials["legacy.example"].notification_title.is_none());
+        let payload = NotificationPayload {
+            event: sample_event_payload(),
+            title: "DM by Someone".into(),
+            body: "New message".into(),
+            icon: String::new(),
+            url: String::new(),
+        };
+        let legacy_background = build_apns_request_body(&payload, true, None);
+        for (topic, expected_title) in [
+            ("legacy.example", "Iris Chat"),
+            ("market.example", "Iris Market"),
+            ("blank.example", "Iris Chat"),
+            ("unknown.example", "Iris Chat"),
+            ("other.example", "Companion"),
+        ] {
+            let credential = credentials.get(topic);
+            let body = build_apns_request_body(&payload, false, credential);
+            assert_eq!(body["aps"]["alert"]["title"], expected_title, "{topic}");
+            assert_eq!(body["aps"]["alert"]["body"], "New message");
+            assert_eq!(body["title"], "DM by Someone");
+            assert_eq!(body["aps"]["mutable-content"], 1);
+            assert_eq!(body["event"], legacy_background["event"]);
+            assert_eq!(
+                build_apns_request_body(&payload, true, credential),
+                legacy_background,
+                "branding must not alter background/VoIP payloads"
+            );
+        }
+    }
+
+    #[test]
     fn build_apns_request_body_keeps_decrypt_fields_from_large_event_details() {
         let payload = NotificationPayload {
             event: EventPayload::Details(large_message_details()),
@@ -831,7 +895,7 @@ mod tests {
             url: "https://example.com/note".to_string(),
         };
 
-        let request_body = build_apns_request_body(&payload, false);
+        let request_body = build_apns_request_body(&payload, false, None);
 
         assert_eq!(request_body["event"]["kind"].as_u64().unwrap(), 1060);
         assert_eq!(
@@ -897,6 +961,7 @@ mod tests {
                 key_id: "chat-key".to_string(),
                 team_id: "chat-team".to_string(),
                 auth_key: "/run/secrets/chat-apns.p8".to_string(),
+                notification_title: None,
             },
         )]);
 

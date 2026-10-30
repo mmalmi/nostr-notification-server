@@ -58,6 +58,14 @@ NNS_DB_MAP_SIZE=2147483648
 NNS_RELAYS='["wss://relay1.com","wss://relay2.com"]'
 ```
 
+`NNS_APNS_CREDENTIALS_JSON` can map each app's APNs topic to its credentials.
+Each row requires `key_id`, `team_id` and `auth_key` (a PEM value or server file
+path). The optional `notification_title` sets that app's visible fallback title,
+for example `"notification_title": "My App"`. Missing or blank titles retain
+`Iris Chat`. This does not change encrypted event data or silent/background
+pushes. Preserve existing topic rows when adding an app, and restart the server
+after configuration changes.
+
 When `social_graph_snapshot_path` is configured, startup fails closed if the
 snapshot cannot be loaded. Binary HTTP snapshots and LMDB snapshots precompute
 the notification visibility policy at startup. The server reloads the snapshot
@@ -106,6 +114,20 @@ Run tests:
 ```bash
 RUST_LOG=debug cargo test
 ```
+
+The APNs payload regression suite was verified with Rust 1.95.0 on
+`x86_64-unknown-linux-gnu` (12 tests). To repeat that development check:
+
+```bash
+cargo +1.95.0 fetch --locked --target x86_64-unknown-linux-gnu
+CARGO_BUILD_JOBS=2 CARGO_PROFILE_TEST_DEBUG=0 CARGO_PROFILE_DEV_DEBUG=0 \
+  CARGO_INCREMENTAL=0 cargo +1.95.0 test --frozen \
+  --target x86_64-unknown-linux-gnu --bin nostr-notification-server \
+  mobile_push::tests::
+```
+
+The tests use synthetic payloads and credentials; no live APNs keys are needed.
+This development check does not verify Docker image reproducibility or deployment.
 
 Watch tests:
 ```bash

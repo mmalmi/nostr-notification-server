@@ -9,6 +9,8 @@ pub struct ApnsCredential {
     pub key_id: String,
     pub team_id: String,
     pub auth_key: String,
+    #[serde(default)]
+    pub notification_title: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
