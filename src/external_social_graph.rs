@@ -509,12 +509,15 @@ fn parse_social_graph_binary(
 ) -> Result<VisibilityPolicy, Box<dyn Error + Send + Sync>> {
     let mut offset = 0usize;
     let version = read_varint(data, &mut offset)?;
-    if !matches!(version, SOCIAL_GRAPH_BINARY_FORMAT_VERSION | 3) {
+    if !matches!(version, SOCIAL_GRAPH_BINARY_FORMAT_VERSION | 3 | 4) {
         return Err(format!("unsupported social graph binary version: {version}").into());
     }
 
     let ids_count = usize::try_from(read_varint(data, &mut offset)?)
         .map_err(|_| "social graph ids count does not fit in memory")?;
+    if ids_count > data.len().saturating_sub(offset) {
+        return Err("social graph count exceeds remaining input".into());
+    }
     let mut pubkey_to_id = HashMap::with_capacity(ids_count);
     for _ in 0..ids_count {
         let (pubkey, id) = read_graph_node(version, data, &mut offset)?;
@@ -523,13 +526,28 @@ fn parse_social_graph_binary(
 
     let follow_lists_count = usize::try_from(read_varint(data, &mut offset)?)
         .map_err(|_| "social graph follow list count does not fit in memory")?;
+    if follow_lists_count > data.len().saturating_sub(offset) {
+        return Err("social graph count exceeds remaining input".into());
+    }
     let mut followed_by_user = HashMap::with_capacity(follow_lists_count);
     for _ in 0..follow_lists_count {
         let owner = u32::try_from(read_varint(data, &mut offset)?)
             .map_err(|_| "social graph follow owner id exceeds u32")?;
         let _created_at = read_varint(data, &mut offset)?;
+        if version >= 4 {
+            let flag = read_bytes(data, &mut offset, 1)?[0];
+            if flag > 2 {
+                return Err("invalid social graph revision flag".into());
+            }
+            if flag != 0 {
+                read_bytes(data, &mut offset, 32)?;
+            }
+        }
         let followed_count = usize::try_from(read_varint(data, &mut offset)?)
             .map_err(|_| "social graph follow count does not fit in memory")?;
+        if followed_count > data.len().saturating_sub(offset) {
+            return Err("social graph count exceeds remaining input".into());
+        }
         let mut followed = HashSet::with_capacity(followed_count);
         for _ in 0..followed_count {
             followed.insert(
@@ -542,13 +560,28 @@ fn parse_social_graph_binary(
 
     let mute_lists_count = usize::try_from(read_varint(data, &mut offset)?)
         .map_err(|_| "social graph mute list count does not fit in memory")?;
+    if mute_lists_count > data.len().saturating_sub(offset) {
+        return Err("social graph count exceeds remaining input".into());
+    }
     let mut muted_by_user = HashMap::with_capacity(mute_lists_count);
     for _ in 0..mute_lists_count {
         let owner = u32::try_from(read_varint(data, &mut offset)?)
             .map_err(|_| "social graph mute owner id exceeds u32")?;
         let _created_at = read_varint(data, &mut offset)?;
+        if version >= 4 {
+            let flag = read_bytes(data, &mut offset, 1)?[0];
+            if flag > 2 {
+                return Err("invalid social graph revision flag".into());
+            }
+            if flag != 0 {
+                read_bytes(data, &mut offset, 32)?;
+            }
+        }
         let muted_count = usize::try_from(read_varint(data, &mut offset)?)
             .map_err(|_| "social graph mute count does not fit in memory")?;
+        if muted_count > data.len().saturating_sub(offset) {
+            return Err("social graph count exceeds remaining input".into());
+        }
         let mut muted = HashSet::with_capacity(muted_count);
         for _ in 0..muted_count {
             muted.insert(
@@ -780,6 +813,32 @@ mod tests {
     use super::*;
     use std::fs;
     use uuid::Uuid;
+
+    #[test]
+    fn version_four_revisions_keep_notification_visibility_rules() {
+        let root = repeated_hex(1);
+        let friend = repeated_hex(2);
+        let muted = repeated_hex(3);
+        let mut bytes = vec![4, 3];
+        for (index, key) in [&root, &friend, &muted].iter().enumerate() {
+            bytes.extend([(index + 1) as u8, 0]);
+            for offset in (0..key.len()).step_by(2) {
+                bytes.push(u8::from_str_radix(&key[offset..offset + 2], 16).unwrap());
+            }
+        }
+        bytes.extend([1, 1, 100, 2]);
+        bytes.extend([7; 32]);
+        bytes.extend([1, 2]);
+        bytes.extend([1, 1, 100, 1]);
+        bytes.extend([8; 32]);
+        bytes.extend([1, 3]);
+        let graph = ExternalSocialGraph::from_social_graph_binary(&root, &bytes).unwrap();
+        assert!(graph.is_author_visible(&root, &friend).unwrap());
+        assert!(!graph.is_author_visible(&root, &muted).unwrap());
+        let revision_flag = 2 + 3 * 34 + 3;
+        bytes[revision_flag] = 3;
+        assert!(ExternalSocialGraph::from_social_graph_binary(&root, &bytes).is_err());
+    }
 
     #[test]
     fn version_three_snapshot_keeps_notification_visibility_rules() {
