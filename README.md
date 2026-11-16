@@ -67,10 +67,25 @@ pushes. Preserve existing topic rows when adding an app, and restart the server
 after configuration changes.
 
 When `social_graph_snapshot_path` is configured, startup fails closed if the
-snapshot cannot be loaded. Binary HTTP snapshots and LMDB snapshots precompute
+snapshot cannot be loaded. Binary HTTP snapshots, signed Hashtree snapshots and LMDB snapshots precompute
 the notification visibility policy at startup. The server reloads the snapshot
 every 60 seconds and replaces the policy only after a complete rebuild. Failed
 refreshes are logged and retain the last complete snapshot.
+
+To read a published graph directly, set `NNS_SOCIAL_GRAPH_SNAPSHOT_PATH` to
+`htree://<publisher-npub>/<tree>` and set `NNS_HASHTREE_RELAYS` to the
+comma-separated name relays and `NNS_HASHTREE_BLOSSOM_URL` to a ciphertext
+read origin. A generic local Blossom cache also works. The publisher npub
+authenticates the directory. The notifier’s own `social_graph_root_pubkey`
+still determines follow distances and notification visibility.
+
+The reader resolves the signed name once per refresh and reads
+`manifest.json` and `social-graph.bin` from that immutable generation.
+It verifies ciphertext block addresses, decrypts locally, checks the graph’s
+size and SHA-256, and rejects backwards checkpoints. An unchanged signed
+root costs a name lookup. A new manifest with the same graph digest skips
+the graph download and policy rebuild. The reader limits the full graph to
+256 MiB and each refresh to two minutes.
 
 `social_graph_filter` controls public notification filtering for every
 subscription, including the configured graph root. There are no recipient

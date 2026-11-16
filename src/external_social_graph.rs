@@ -7,7 +7,10 @@ use std::fmt;
 use std::io::{self, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::Path;
-use std::sync::RwLock;
+use std::sync::{Mutex, RwLock};
+
+mod named_snapshot;
+use named_snapshot::{Generation, NamedSnapshot};
 use std::thread;
 use std::time::Duration;
 
@@ -29,6 +32,7 @@ const OVERMUTE_THRESHOLD: usize = 3;
 
 pub struct ExternalSocialGraph {
     policy: RwLock<VisibilityPolicy>,
+    named: Option<(NamedSnapshot, Mutex<Generation>)>,
 }
 
 struct VisibilityPolicy {
@@ -81,6 +85,9 @@ impl Error for ExternalSocialGraphOpenError {
 
 impl ExternalSocialGraph {
     pub fn open(source: &str, root_pubkey: &str) -> Result<Self, Box<dyn Error + Send + Sync>> {
+        if source.starts_with("htree://") {
+            return Self::open_named(NamedSnapshot::from_env(source)?, root_pubkey);
+        }
         if source.starts_with("http://") {
             return Self::from_social_graph_url(source, root_pubkey);
         }
@@ -96,6 +103,17 @@ impl ExternalSocialGraph {
         }
 
         open_read_only_graph_with_retries(path, root_pubkey)
+    }
+
+    fn open_named(
+        named: NamedSnapshot,
+        root_pubkey: &str,
+    ) -> Result<Self, Box<dyn Error + Send + Sync>> {
+        let (generation, bytes) = named.fetch(None)?;
+        let bytes = bytes.ok_or("initial Hashtree graph contains no data")?;
+        let mut graph = Self::from_social_graph_binary(root_pubkey, &bytes)?;
+        graph.named = Some((named, Mutex::new(generation)));
+        Ok(graph)
     }
 
     fn from_env(env: Env, root_pubkey: &str) -> Result<Self, Box<dyn Error + Send + Sync>> {
@@ -191,6 +209,7 @@ impl ExternalSocialGraph {
         drop(rtxn);
 
         Ok(Self {
+            named: None,
             policy: VisibilityPolicy::new(
                 root_pubkey,
                 pubkey_to_id,
@@ -242,6 +261,25 @@ impl ExternalSocialGraph {
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         // Fetch and fully compute the next policy before replacing the active
         // snapshot. Readers never observe a partially rebuilt graph.
+        if let Some((named, installed)) = &self.named {
+            let mut current = installed
+                .lock()
+                .map_err(|_| "graph generation lock poisoned")?;
+            let (generation, bytes) = named.fetch(Some(&current))?;
+            if let Some(bytes) = bytes {
+                let policy = parse_social_graph_binary(root_pubkey, &bytes)?;
+                let old = std::mem::replace(
+                    &mut *self
+                        .policy
+                        .write()
+                        .map_err(|_| "graph policy lock poisoned")?,
+                    policy,
+                );
+                drop(old);
+            }
+            *current = generation;
+            return Ok(());
+        }
         let replacement = Self::open(source, root_pubkey)?;
         let policy = replacement
             .policy
@@ -269,6 +307,7 @@ impl ExternalSocialGraph {
         let snapshot = parse_social_graph_binary(root_pubkey, data)?;
         Ok(Self {
             policy: snapshot.into(),
+            named: None,
         })
     }
 }
