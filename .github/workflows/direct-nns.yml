@@ -1,0 +1,60 @@
+name: Direct Hashtree notification qualification
+on:
+  push:
+    branches: [codex/direct-hashtree-notifications-ci]
+permissions:
+  contents: read
+jobs:
+  qualify:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    env:
+      SOURCE: e07f4ada1e6160c7c1e39f075b4e5d4c1cdb20d1
+      RUSTUP_TOOLCHAIN: 1.99.0
+      CARGO_BUILD_JOBS: 3
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_RELEASE_DEBUG: 0
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: e07f4ada1e6160c7c1e39f075b4e5d4c1cdb20d1
+          persist-credentials: false
+      - name: Verify toolchain, capacity and lock
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE"
+          mkdir "$RUNNER_TEMP/notification-qualification"
+          echo "PROOF=$RUNNER_TEMP/notification-qualification" >> "$GITHUB_ENV"
+          test "$(df -PB1 . | awk 'END{print $4}')" -gt 27917287424
+          rustup toolchain install 1.99.0 --profile minimal
+          echo "f3834d26669b03f6855fa54bd2381443123e860167bc0c7a8dd137e5cf6e5e4f  $(rustup which rustc)" | sha256sum --check
+          rustc -Vv > "$RUNNER_TEMP/notification-qualification/toolchain.txt"
+          cargo fetch --locked --target x86_64-unknown-linux-gnu
+      - name: Build locked release and normal notification test harness
+        run: |
+          set -euo pipefail
+          cargo test --release --frozen --bin nostr-notification-server --no-run --message-format=json > "$RUNNER_TEMP/notification-build.jsonl"
+          cargo build --release --frozen --bin nostr-notification-server
+          cp target/release/nostr-notification-server "$PROOF/"
+          BIN_TEST=$(jq -r 'select(.reason=="compiler-artifact" and .profile.test and .executable!=null)|.executable' "$RUNNER_TEMP/notification-build.jsonl" | tail -1)
+          test -x "$BIN_TEST"
+          echo "NNS_TEST=$BIN_TEST" >> "$GITHUB_ENV"
+          ldd "$PROOF/nostr-notification-server" > "$PROOF/libraries.txt"
+          readelf --version-info "$PROOF/nostr-notification-server" > "$PROOF/symbols.txt"
+          test "$(grep -oE 'GLIBC_[0-9.]+' "$PROOF/symbols.txt" | sed 's/GLIBC_//' | sort -V | tail -1)" = "2.34"
+          sha256sum "$PROOF/nostr-notification-server" | cut -d' ' -f1 > "$PROOF/binary.sha256"
+          sha256sum Cargo.lock > "$PROOF/lock.sha256"
+          printf '%s\n' "$SOURCE" > "$PROOF/source.txt"
+      - name: Exercise signed directory and all unit tests on loopback only
+        run: |
+          set -euo pipefail
+          sudo -n unshare --net --fork --kill-child bash -ec 'ip link set lo up; test "$(ls /sys/class/net)" = lo; exec runuser -u "$1" -- "$2" --test-threads=1' isolated "$USER" "$NNS_TEST" | tee "$PROOF/tests.log"
+          grep -F 'signed_tree_refresh_reuses_content_and_preserves_policy_after_failure ... ok' "$PROOF/tests.log"
+          test -z "$(git status --porcelain --untracked-files=no)"
+      - name: Retain verified binary and receipts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: notification-server-${{ github.sha }}
+          path: ${{ runner.temp }}/notification-qualification
+          retention-days: 14
